@@ -1,0 +1,196 @@
+/* Import fonts - add this to your index.html or App.css */
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap');
+
+/* Base styles */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Poppins', sans-serif;
+}
+
+.home-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 20px;
+  background: linear-gradient(135deg, #6e8efb, #a777e3);
+}
+
+.home-card {
+  background: white;
+  border-radius: 16px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
+  padding: 40px;
+  width: 100%;
+  max-width: 450px;
+  text-align: center;
+  transition: transform 0.3s ease;
+}
+
+.home-card:hover {
+  transform: translateY(-5px);
+}
+
+.logo-container {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 24px;
+}
+
+.logo {
+  background: linear-gradient(135deg, #6e8efb, #a777e3);
+  color: white;
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  font-weight: 600;
+  box-shadow: 0 4px 20px rgba(106, 142, 251, 0.3);
+}
+
+.home-title {
+  font-size: 28px;
+  font-weight: 600;
+  margin-bottom: 10px;
+  color: #333;
+}
+
+.home-subtitle {
+  font-size: 16px;
+  margin-bottom: 30px;
+  color: #666;
+  font-weight: 300;
+}
+
+.home-form {
+  display: flex;
+  flex-direction: column;
+  gap: 25px;
+  margin-bottom: 20px;
+}
+
+.input-container {
+  position: relative;
+  width: 100%;
+}
+
+.home-input {
+  width: 100%;
+  padding: 16px 20px;
+  font-size: 16px;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  background-color: #f9f9f9;
+  transition: all 0.3s;
+}
+
+.home-input:focus {
+  outline: none;
+  border-color: #6e8efb;
+  background-color: white;
+  box-shadow: 0 0 0 3px rgba(110, 142, 251, 0.2);
+}
+
+.floating-label {
+  position: absolute;
+  pointer-events: none;
+  left: 20px;
+  top: 16px;
+  transition: 0.2s ease all;
+  color: #999;
+  font-size: 16px;
+}
+
+.home-input:focus ~ .floating-label,
+.home-input:not(:placeholder-shown) ~ .floating-label {
+  top: -10px;
+  left: 10px;
+  font-size: 12px;
+  color: #6e8efb;
+  background: white;
+  padding: 0 5px;
+}
+
+.home-input::placeholder {
+  color: transparent;
+}
+
+.home-button {
+  padding: 16px;
+  font-size: 16px;
+  background: linear-gradient(135deg, #6e8efb, #a777e3);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.3s ease;
+  box-shadow: 0 4px 15px rgba(106, 142, 251, 0.4);
+}
+
+.home-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(106, 142, 251, 0.5);
+}
+
+.home-button:active {
+  transform: translateY(1px);
+}
+
+.home-button:disabled {
+  background: #cccccc;
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+}
+
+.home-error {
+  color: #ff5252;
+  font-size: 14px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  background-color: rgba(255, 82, 82, 0.1);
+  border-radius: 6px;
+  text-align: center;
+}
+
+.home-footer {
+  margin-top: 30px;
+  font-size: 14px;
+  color: #777;
+}
+
+.support-link {
+  color: #6e8efb;
+  text-decoration: none;
+  font-weight: 500;
+  transition: color 0.2s;
+}
+
+.support-link:hover {
+  color: #a777e3;
+  text-decoration: underline;
+}
+
+/* Responsive adjustments */
+@media (max-width: 480px) {
+  .home-card {
+    padding: 30px 20px;
+  }
+  
+  .home-title {
+    font-size: 24px;
+  }
+  
+  .home-subtitle {
+    font-size: 14px;
+  }
+}
