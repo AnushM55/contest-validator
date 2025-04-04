@@ -948,7 +948,7 @@ const ContestPage = () => {
                 onClick={handleUploadClick}
                 disabled={isUploading || !testCaseFilesMap[selectedMilestone]?.[selectedTestCase]?.output?.id || !isSignedIn}
               >
-                {isUploading ? 'Scoring...' : 'Upload Your Output & Score'}
+                {isUploading ? 'Scoring...' : 'Upload Your Output'}
               </button>
           
               <input
