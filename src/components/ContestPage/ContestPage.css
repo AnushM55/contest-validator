@@ -338,3 +338,33 @@
     font-weight: 600;
     color: #003a8c; /* Even darker blue */
   }
+
+  /* Confirmation for Proceeding */
+  .proceed-confirmation {
+    margin-top: 15px;
+    padding: 15px;
+    background-color: #f0fff0; /* Light green background */
+    border: 1px solid #b7eb8f; /* Green border */
+    border-radius: 6px;
+  }
+
+  .proceed-confirmation p {
+    margin-bottom: 10px;
+    color: #389e0d; /* Dark green text */
+    font-weight: 500;
+  }
+
+  .proceed-button {
+    padding: 10px 20px;
+    border-radius: 6px;
+    border: none;
+    background-color: #52c41a; /* Green button */
+    color: white;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background-color 0.2s;
+  }
+
+  .proceed-button:hover {
+    background-color: #389e0d; /* Darker green on hover */
+  }

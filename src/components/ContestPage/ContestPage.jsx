@@ -1,5 +1,5 @@
 import { useParams, Link } from 'react-router-dom';
-import { useState, useRef, useEffect, useCallback } from 'react'; // Import useCallback
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'; // Import useMemo
 import { gapi } from 'gapi-script'; // Import gapi-script
 import Papa from 'papaparse';
 import './ContestPage.css';
@@ -22,7 +22,35 @@ const API_BASE_URL = process.env.REACT_APP_API_BASE_URL;
 
 // Filename parsing regex (adjust if convention differs)
 const PROBLEM_REGEX = /Problem_M(\d+)\.pdf$/i;
-const TESTCASE_REGEX = /TestCase_M(\d+)_T(\d+)\.csv$/i;
+// Updated regex to capture input/output type and handle extensions
+const TESTCASE_REGEX = /TestCase_M(\d+)_T(\d+)_(input|output)\.(csv|json|txt)$/i;
+
+// Helper function to find the next available test case ID
+// Now uses testCaseFilesMap keys instead of allFiles
+const findNextTestCaseId = (currentMilestoneScores, currentMilestoneTestCases, selectedTestCase) => {
+    // currentMilestoneTestCases should be an array of test case numbers ['1', '2', ...]
+    if (!selectedTestCase || !currentMilestoneTestCases || !currentMilestoneScores) {
+        return null;
+    }
+
+    // Sort the available test case numbers for the current milestone
+    const sortedDiscovered = [...currentMilestoneTestCases].sort((a, b) => parseInt(a) - parseInt(b));
+
+    // Determine which test cases are unlocked based on scores
+    const newlyAvailableTestCases = [];
+    for (const tc of sortedDiscovered) {
+        const tcNum = parseInt(tc);
+        if (tcNum === 1 || (currentMilestoneScores[String(tcNum - 1)] === 100)) {
+            newlyAvailableTestCases.push(tc);
+        } else {
+            break;
+        }
+    }
+    const currentTestCaseIndex = newlyAvailableTestCases.indexOf(selectedTestCase);
+    const hasNextTestCase = currentTestCaseIndex !== -1 && currentTestCaseIndex < newlyAvailableTestCases.length - 1;
+    return hasNextTestCase ? newlyAvailableTestCases[currentTestCaseIndex + 1] : null;
+};
+
 
 const ContestPage = () => {
   const { id } = useParams();
@@ -31,9 +59,9 @@ const ContestPage = () => {
   const [selectedTestCase, setSelectedTestCase] = useState(''); // Default to empty, set after fetch
   // State for available options, populated from Drive
   const [availableMilestones, setAvailableMilestones] = useState([]); // e.g., ['1', '2']
-  const [availableTestCases, setAvailableTestCases] = useState([]); // Test cases for the selected milestone e.g., ['1', '2', '3']
-  // State to hold all fetched file metadata
-  const [allFiles, setAllFiles] = useState([]); // Store all file objects from the list call
+  const [availableTestCases, setAvailableTestCases] = useState([]); // Test cases for the selected milestone e.g., [{id: '1', locked: false}, ...]
+  // State to hold the structured map of test case files
+  const [testCaseFilesMap, setTestCaseFilesMap] = useState({}); // e.g., { '1': { '1': { input: file, output: file }, ... }, ... }
 
   const [uploadedFile, setUploadedFile] = useState(null);
   const [isDownloadingInput, setIsDownloadingInput] = useState(false);
@@ -42,7 +70,8 @@ const ContestPage = () => {
   const [isLoadingFiles, setIsLoadingFiles] = useState(false); // Now tracks file loading *after* sign-in
   const [driveError, setDriveError] = useState(null);
   const [problemStatementFile, setProblemStatementFile] = useState(null); // Currently selected PDF file object
-  const [testCaseInputFile, setTestCaseInputFile] = useState(null); // Currently selected CSV file object
+  const [problemStatementFilesMap, setProblemStatementFilesMap] = useState({}); // Stores { '1': pdfFileObj, ... }
+  // testCaseInputFile state is removed, derived from map instead
   const [score, setScore] = useState(null);
   const fileInputRef = useRef(null);
 
@@ -52,27 +81,19 @@ const ContestPage = () => {
   const [isAuthLoading, setIsAuthLoading] = useState(true); // Tracks initial auth check
   const [authError, setAuthError] = useState(null);
   const [userName, setUserName] = useState('');
-  const [completionStatus, setCompletionStatus] = useState({}); // Stores { milestoneId: [completedTestCaseId, ...], ... }
+  const [completionStatus, setCompletionStatus] = useState({}); // Stores { milestoneId: { testCaseId: score, ... }, ... }
   // --- ---
-  
-  // Remove hardcoded lists
-  // const milestones = ['1', '2', '3'];
-  // const testCases = ['1', '2', '3', '4', '5'];
   
   // Handler for Milestone dropdown change
   const handleMilestoneChange = (e) => {
     const newMilestone = e.target.value;
     setSelectedMilestone(newMilestone);
-    // Test cases and selected files will be updated by the useEffect hooks
-    // Resetting selected test case here might cause a brief inconsistent state,
-    // the useEffect hook depending on selectedMilestone handles it.
   };
 
   // Handler for Test Case dropdown change
   const handleTestCaseChange = (e) => {
     const newTestCase = e.target.value;
     setSelectedTestCase(newTestCase);
-    // Selected files will be updated by the useEffect hook depending on selectedTestCase
   };
 
   // --- Google API Initialization and Auth Handling ---
@@ -86,64 +107,54 @@ const ContestPage = () => {
           scope: SCOPES,
         });
         setIsGapiLoaded(true);
-
-        // Listen for sign-in state changes.
         gapi.auth2.getAuthInstance().isSignedIn.listen(updateSigninStatus);
-
-        // Handle the initial sign-in state.
         updateSigninStatus(gapi.auth2.getAuthInstance().isSignedIn.get());
       } catch (error) {
         console.error("Error initializing GAPI client:", error);
         setAuthError(`Error initializing Google API: ${error.message || JSON.stringify(error)}`);
-        setIsAuthLoading(false); // Stop loading on error
+        setIsAuthLoading(false);
       }
     };
 
     const updateSigninStatus = (signedIn) => {
       setIsSignedIn(signedIn);
-      setIsAuthLoading(false); // Initial auth check complete
-      setAuthError(null); // Clear previous auth errors on status change
+      setIsAuthLoading(false);
+      setAuthError(null);
       if (signedIn) {
-        // Get user profile information
         const profile = gapi.auth2.getAuthInstance().currentUser.get().getBasicProfile();
         setUserName(profile.getName());
-        // Clear file/score state from previous sessions/users
         setProblemStatementFile(null);
-        setTestCaseInputFile(null);
+        // setTestCaseInputFile(null); // Removed state
         setUploadedFile(null);
         setScore(null);
         setDriveError(null);
-        // Fetch progress when user signs in
-        fetchProgress(id); 
+        setTestCaseFilesMap({}); // Clear the map on sign in before fetch
+        fetchProgress(id);
       } else {
         setUserName('');
-        // Clear data when user signs out
         setProblemStatementFile(null);
-        setTestCaseInputFile(null);
+        // setTestCaseInputFile(null); // Removed state
         setUploadedFile(null);
         setScore(null);
         setDriveError(null);
-        setIsLoadingFiles(false); // Stop file loading if user signs out
-        setCompletionStatus({}); // Clear progress on sign out
+        setIsLoadingFiles(false);
+        setCompletionStatus({});
+        setTestCaseFilesMap({}); // Clear the map on sign out
       }
     };
 
-    // Load the GAPI client and auth2 module
     gapi.load('client:auth2', initClient);
   // eslint-disable-next-line react-hooks/exhaustive-deps 
-  }, [id]); // Add id as dependency (fetchProgress depends on it indirectly via updateSigninStatus)
-  // Note: fetchProgress and updateSigninStatus are defined inside useEffect or are stable, 
-  // but adding id covers the case where the component might remount with a different id.
-  // If fetchProgress were defined outside and not memoized, it would also need to be added.
+  }, [id]); 
 
   // --- Sign-in/Sign-out Handlers ---
   const handleAuthClick = () => {
     if (!isGapiLoaded) return;
-    setIsAuthLoading(true); // Show loading during sign-in attempt
+    setIsAuthLoading(true);
     gapi.auth2.getAuthInstance().signIn().catch(err => {
         console.error("Sign-in error:", err);
         setAuthError(`Sign-in failed: ${err.error || err.message || 'Unknown error'}`);
-        setIsAuthLoading(false); // Stop loading on error
+        setIsAuthLoading(false);
     });
   };
 
@@ -158,34 +169,32 @@ const ContestPage = () => {
   useEffect(() => {
     const fetchAndParseFiles = async () => {
       if (!isGapiLoaded || !isSignedIn || !CONTEST_FOLDER_ID) {
-        setAllFiles([]);
+        setTestCaseFilesMap({}); // Clear map
         setAvailableMilestones([]);
         setAvailableTestCases([]);
         setSelectedMilestone('');
         setSelectedTestCase('');
         setProblemStatementFile(null);
-        setTestCaseInputFile(null);
+        // setTestCaseInputFile(null); // Removed state
         setIsLoadingFiles(false);
         return;
       }
 
       setIsLoadingFiles(true);
       setDriveError(null);
-      setAllFiles([]); // Clear previous file list
+      setTestCaseFilesMap({}); // Clear previous map
 
       try {
-        let allFetchedFiles = [];
+        let allFetchedFiles = []; // Still fetch all files initially
         let pageToken = undefined;
-        // Loop to handle pagination if there are many files
         do {
           const response = await gapi.client.drive.files.list({
             q: `'${CONTEST_FOLDER_ID}' in parents and trashed=false`,
             fields: 'nextPageToken, files(id, name, mimeType, webViewLink, webContentLink)',
             spaces: 'drive',
-            pageSize: 100, // Fetch up to 100 items per page
+            pageSize: 100,
             pageToken: pageToken,
           });
-          
           const result = response.result;
           if (result.files) {
             allFetchedFiles = allFetchedFiles.concat(result.files);
@@ -193,42 +202,92 @@ const ContestPage = () => {
           pageToken = result.nextPageToken;
         } while (pageToken);
 
-        setAllFiles(allFetchedFiles); // Store all files
-
-        // Parse filenames to find available milestones
+        // --- Process fetched files into the structured map AND find PDFs ---
+        const newTestCaseFilesMap = {};
+        const newProblemStatementFilesMap = {}; // Temporary map for PDFs
         const milestonesSet = new Set();
+
         allFetchedFiles.forEach(file => {
           const problemMatch = file.name?.match(PROBLEM_REGEX);
-          const testcaseMatch = file.name?.match(TESTCASE_REGEX);
           if (problemMatch) {
-            milestonesSet.add(problemMatch[1]); // Add milestone number from PDF
+            const milestoneId = problemMatch[1];
+            milestonesSet.add(milestoneId);
+            if (!newProblemStatementFilesMap[milestoneId]) { // Store the first matching PDF found
+                 newProblemStatementFilesMap[milestoneId] = file;
+            } else {
+                 console.warn(`Duplicate Problem PDF found for M${milestoneId}: ${file.name}. Using the first one found.`);
+            }
           }
+
+          const testcaseMatch = file.name?.match(TESTCASE_REGEX);
           if (testcaseMatch) {
-            milestonesSet.add(testcaseMatch[1]); // Add milestone number from CSV
+            const [, milestoneId, testCaseId, type] = testcaseMatch; // type is 'input' or 'output'
+            milestonesSet.add(milestoneId);
+
+            // Ensure milestone and test case entries exist
+            if (!newTestCaseFilesMap[milestoneId]) {
+              newTestCaseFilesMap[milestoneId] = {};
+            }
+            if (!newTestCaseFilesMap[milestoneId][testCaseId]) {
+              newTestCaseFilesMap[milestoneId][testCaseId] = { input: null, output: null };
+            }
+
+            // Add the file to the correct slot (input/output)
+            if (type === 'input') {
+              if (newTestCaseFilesMap[milestoneId][testCaseId].input) {
+                 console.warn(`Duplicate input file found for M${milestoneId} T${testCaseId}: ${file.name}. Using the first one found.`);
+              } else {
+                 newTestCaseFilesMap[milestoneId][testCaseId].input = file;
+              }
+            } else if (type === 'output') {
+               if (newTestCaseFilesMap[milestoneId][testCaseId].output) {
+                 console.warn(`Duplicate output file found for M${milestoneId} T${testCaseId}: ${file.name}. Using the first one found.`);
+               } else {
+                 newTestCaseFilesMap[milestoneId][testCaseId].output = file;
+               }
+            }
           }
         });
 
+        // --- Validate the map: Ensure each test case has both input and output ---
+        Object.keys(newTestCaseFilesMap).forEach(mId => {
+            Object.keys(newTestCaseFilesMap[mId]).forEach(tId => {
+                const pair = newTestCaseFilesMap[mId][tId];
+                if (!pair.input || !pair.output) {
+                    console.warn(`Incomplete file pair for M${mId} T${tId}. Input: ${pair.input?.name}, Output: ${pair.output?.name}. This test case might not work correctly.`);
+                    // Optionally remove incomplete pairs: delete newTestCaseFilesMap[mId][tId];
+                }
+            });
+             // Optionally remove milestones with no complete pairs
+            // if (Object.keys(newTestCaseFilesMap[mId]).length === 0) {
+            //     delete newTestCaseFilesMap[mId];
+            //     milestonesSet.delete(mId);
+            // }
+        });
+
+        setTestCaseFilesMap(newTestCaseFilesMap); // Store the structured map
+        setProblemStatementFilesMap(newProblemStatementFilesMap); // Store the found PDFs
+
+        // --- Update available milestones ---
         const sortedMilestones = Array.from(milestonesSet).sort((a, b) => parseInt(a) - parseInt(b));
         setAvailableMilestones(sortedMilestones);
 
-        // Set the first milestone as selected by default
-        if (sortedMilestones.length > 0) {
+        // --- Set default selected milestone ---
+        if (sortedMilestones.length > 0 && !selectedMilestone) {
           setSelectedMilestone(sortedMilestones[0]);
-          // Note: Updating test cases and selected files will happen in separate useEffect hooks
-        } else {
+        } else if (sortedMilestones.length === 0) {
             setSelectedMilestone('');
             setAvailableTestCases([]);
             setSelectedTestCase('');
             setProblemStatementFile(null);
-            setTestCaseInputFile(null);
-            setDriveError("No valid milestone files (e.g., Problem_M1.pdf or TestCase_M1_T1.csv) found in the folder.");
+            // setTestCaseInputFile(null); // Removed state
+            setDriveError("No valid milestone files (Problem_M*.pdf or TestCase_M*_T*_input/output.*) found.");
         }
-
       } catch (error) {
-        console.error("Error fetching/parsing Google Drive files via GAPI:", error);
+        console.error("Error fetching/parsing Google Drive files:", error);
         const errorDetails = error.result?.error?.message || error.message || 'An unknown error occurred.';
         setDriveError(`Error fetching/parsing files: ${errorDetails}`);
-        setAllFiles([]); // Clear files on error
+        setTestCaseFilesMap({}); // Clear map on error
         setAvailableMilestones([]);
         setAvailableTestCases([]);
         setSelectedMilestone('');
@@ -239,71 +298,58 @@ const ContestPage = () => {
     };
 
     fetchAndParseFiles();
-    // Depend on sign-in status and GAPI load status
-  }, [isGapiLoaded, isSignedIn]); // Dependency: only run when auth state changes
+  // Depend on sign-in status. selectedMilestone is removed as dependency here,
+  // because selecting a milestone shouldn't re-fetch all files, only update derived state.
+  }, [isGapiLoaded, isSignedIn]);
 
 
   // --- Fetch User Progress (Memoized) ---
-  // Define fetchProgress outside the useEffect that calls it
   const fetchProgress = useCallback(async (contestId) => {
-    // Check dependencies directly inside useCallback
-    // Ensure contestId is valid before proceeding
     if (!isSignedIn || !isGapiLoaded || !API_BASE_URL || !contestId) return; 
 
     try {
       const token = gapi.auth2.getAuthInstance().currentUser.get().getAuthResponse().id_token;
       const response = await fetch(`${API_BASE_URL}/api/progress/${contestId}`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
+        headers: { 'Authorization': `Bearer ${token}` }
       });
       if (!response.ok) {
         const errorData = await response.json();
         throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
       }
       const progressData = await response.json();
-      setCompletionStatus(progressData || {}); // Ensure it's an object
+      setCompletionStatus(progressData || {});
     } catch (error) {
       console.error("Error fetching progress:", error);
-      setDriveError(`Failed to fetch progress: ${error.message}`); // Use driveError state for simplicity
-      setCompletionStatus({}); // Reset progress on error
+      setDriveError(`Failed to fetch progress: ${error.message}`);
+      setCompletionStatus({});
     }
-  // Add dependencies for useCallback
   }, [isSignedIn, isGapiLoaded, API_BASE_URL]); 
 
   // --- Google API Initialization and Auth Handling ---
-  // Define updateSigninStatus outside useEffect, memoize with useCallback
   const updateSigninStatus = useCallback((signedIn) => {
     setIsSignedIn(signedIn);
-    setIsAuthLoading(false); // Initial auth check complete
-    setAuthError(null); // Clear previous auth errors on status change
+    setIsAuthLoading(false);
+    setAuthError(null);
     if (signedIn) {
-      // Get user profile information
       const profile = gapi.auth2.getAuthInstance().currentUser.get().getBasicProfile();
       setUserName(profile.getName());
-      // Clear file/score state from previous sessions/users
       setProblemStatementFile(null);
-      setTestCaseInputFile(null);
+      // setTestCaseInputFile(null); // Removed state
       setUploadedFile(null);
       setScore(null);
       setDriveError(null);
-      // Fetch progress when user signs in - use the id from component scope
-      if (id) { // Ensure id is available
-        fetchProgress(id); 
-      }
+      if (id) fetchProgress(id); 
     } else {
       setUserName('');
-      // Clear data when user signs out
       setProblemStatementFile(null);
-      setTestCaseInputFile(null);
+      // setTestCaseInputFile(null); // Removed state
       setUploadedFile(null);
       setScore(null);
       setDriveError(null);
-      setIsLoadingFiles(false); // Stop file loading if user signs out
-      setCompletionStatus({}); // Clear progress on sign out
+      setIsLoadingFiles(false);
+      setCompletionStatus({});
     }
-  // Dependencies for updateSigninStatus
-  }, [id, fetchProgress, setUserName, setIsSignedIn, setIsAuthLoading, setAuthError, setProblemStatementFile, setTestCaseInputFile, setUploadedFile, setScore, setDriveError, setIsLoadingFiles, setCompletionStatus]); 
+  }, [id, fetchProgress]); 
 
   useEffect(() => {
     const initClient = async () => {
@@ -315,141 +361,98 @@ const ContestPage = () => {
           scope: SCOPES,
         });
         setIsGapiLoaded(true);
-
-        // Listen for sign-in state changes.
         gapi.auth2.getAuthInstance().isSignedIn.listen(updateSigninStatus);
-
-        // Handle the initial sign-in state.
         updateSigninStatus(gapi.auth2.getAuthInstance().isSignedIn.get());
       } catch (error) {
         console.error("Error initializing GAPI client:", error);
         setAuthError(`Error initializing Google API: ${error.message || JSON.stringify(error)}`);
-        setIsAuthLoading(false); // Stop loading on error
+        setIsAuthLoading(false);
       }
     };
-
-    // Load the GAPI client and auth2 module
     gapi.load('client:auth2', initClient);
-  // Add updateSigninStatus (now stable) to dependency array
   }, [updateSigninStatus]); 
 
 
-  // --- Effect to Update Test Cases when Milestone Changes (incorporates progress) ---
+  // --- Effect to Update Test Cases when Milestone Changes (uses testCaseFilesMap) ---
   useEffect(() => {
-    if (!selectedMilestone || allFiles.length === 0) {
+    // Check if the selected milestone exists in our map
+    if (!selectedMilestone || !testCaseFilesMap[selectedMilestone]) {
       setAvailableTestCases([]);
       setSelectedTestCase('');
       return;
     }
 
-    // Get the scores for the current milestone, default to empty object
-    const milestoneScores = completionStatus[selectedMilestone] || {}; 
-    const discoveredTestCases = new Set();
-    allFiles.forEach(file => {
-      const match = file.name?.match(TESTCASE_REGEX);
-      if (match && match[1] === selectedMilestone) {
-        discoveredTestCases.add(match[2]); // Add the test case number
-      }
+    const milestoneScores = completionStatus[selectedMilestone] || {};
+    // Get test case numbers available for this milestone from the map keys
+    const discoveredTestCases = Object.keys(testCaseFilesMap[selectedMilestone]);
+
+    const sortedDiscovered = discoveredTestCases.sort((a, b) => parseInt(a) - parseInt(b));
+
+    const testCasesWithStatus = sortedDiscovered.map(tc => {
+        const tcNum = parseInt(tc);
+        let locked = false;
+        if (tcNum > 1) {
+            const prevTc = String(tcNum - 1);
+            if (milestoneScores[prevTc] !== 100) locked = true;
+        }
+        return { id: tc, locked: locked };
     });
 
-    const sortedDiscovered = Array.from(discoveredTestCases).sort((a, b) => parseInt(a) - parseInt(b));
-    
-    // Determine which test cases are actually available based on 100% score on previous
-    const unlockedTestCases = [];
-    for (const tc of sortedDiscovered) {
-        const tcNum = parseInt(tc);
-        // Test case 1 is always available if discovered
-        if (tcNum === 1) {
-            unlockedTestCases.push(tc);
-        } else {
-            // Check if the previous test case exists and has a score of 100
-            const prevTc = String(tcNum - 1);
-            if (milestoneScores[prevTc] === 100) {
-                unlockedTestCases.push(tc);
-            } else {
-                // If previous test case wasn't passed with 100%, stop unlocking further test cases
-                break; 
-            }
-        }
+    setAvailableTestCases(testCasesWithStatus);
+
+    const currentSelectionValid = testCasesWithStatus.some(tc => tc.id === selectedTestCase);
+    if (!currentSelectionValid && testCasesWithStatus.length > 0) {
+        const firstUnlocked = testCasesWithStatus.find(tc => !tc.locked);
+        setSelectedTestCase(firstUnlocked ? firstUnlocked.id : testCasesWithStatus[0].id);
+    } else if (testCasesWithStatus.length === 0) {
+        setSelectedTestCase('');
+        console.warn(`No discovered test cases found for Milestone ${selectedMilestone}`);
     }
 
-    setAvailableTestCases(unlockedTestCases);
-
-    // Select the first *unlocked* test case, or clear selection if none are available/unlocked
-    if (unlockedTestCases.length > 0) {
-        // If the previously selected test case is still unlocked, keep it. Otherwise, select the first unlocked.
-        if (!unlockedTestCases.includes(selectedTestCase)) {
-             setSelectedTestCase(unlockedTestCases[0]);
-        }
-    } else {
-      setSelectedTestCase('');
-      console.warn(`No available/unlocked test cases found for Milestone ${selectedMilestone}`);
-    }
-    // Reset upload state when milestone changes
     setUploadedFile(null);
-    // setScore(null); // Remove score reset here
 
-  }, [selectedMilestone, allFiles, completionStatus, selectedTestCase]); // Keep selectedTestCase here
+  // Update dependency array: use testCaseFilesMap instead of allFiles
+  }, [selectedMilestone, testCaseFilesMap, completionStatus, selectedTestCase]);
 
 
-  // --- Effect to Update Selected Files based on M/T selection ---
+  // --- Effect to Update Selected Problem Statement File (uses problemStatementFilesMap) ---
   useEffect(() => {
-    if (!selectedMilestone || !selectedTestCase || allFiles.length === 0) {
+    if (!selectedMilestone) {
       setProblemStatementFile(null);
-      setTestCaseInputFile(null);
       return;
     }
 
-    // Find the corresponding problem statement PDF
-    const pdf = allFiles.find(file => {
-        const match = file.name?.match(PROBLEM_REGEX);
-        return match && match[1] === selectedMilestone;
-    });
-    setProblemStatementFile(pdf || null);
-    if (!pdf) console.warn(`Problem PDF for M${selectedMilestone} not found.`);
+    // Retrieve the PDF file object from the map based on the selected milestone
+    const pdf = problemStatementFilesMap[selectedMilestone];
+    setProblemStatementFile(pdf || null); // Set state, will be null if not found
 
-    // Find the corresponding test case CSV
-    const csv = allFiles.find(file => {
-        const match = file.name?.match(TESTCASE_REGEX);
-        return match && match[1] === selectedMilestone && match[2] === selectedTestCase;
-    });
-    setTestCaseInputFile(csv || null);
-     if (!csv) console.warn(`Test Case CSV for M${selectedMilestone} T${selectedTestCase} not found.`);
+    if (!pdf) {
+        console.warn(`Problem PDF for M${selectedMilestone} not found in the fetched files map.`);
+    }
 
-     // Reset upload state when test case changes
-     setUploadedFile(null);
-     // setScore(null); // Remove score reset here
+    // Reset upload state when selection changes
+    setUploadedFile(null);
 
-  }, [selectedMilestone, selectedTestCase, allFiles]); // Re-run when selection or files change
+  // This effect now depends on selectedMilestone and the map containing the PDFs
+  }, [selectedMilestone, problemStatementFilesMap]);
 
 
   // --- Download Problem Statement (Using GAPI) ---
   const handleDownloadStatementClick = async () => {
-      if (!problemStatementFile || !isSignedIn) return; // Need to be signed in
-
+      if (!problemStatementFile || !isSignedIn) return; 
       setIsDownloadingStatement(true);
       setDriveError(null);
-
-      // Simplest approach: Open the webViewLink which should always be available
-      // Direct download via webContentLink or fetch requires more complex token handling/CORS
       if (problemStatementFile.webViewLink) {
           window.open(problemStatementFile.webViewLink, '_blank');
       } else {
           console.warn("No webViewLink found for:", problemStatementFile.id);
-          // Attempt to fetch metadata explicitly if link is missing (less common)
           try {
-                  const response = await gapi.client.drive.files.get({
-                      fileId: problemStatementFile.id,
-                      fields: 'webViewLink' // Only need webViewLink for fallback
-                  });
+                  const response = await gapi.client.drive.files.get({ fileId: problemStatementFile.id, fields: 'webViewLink' });
                   const metadata = response.result;
-                  if (metadata.webViewLink) {
-                      window.open(metadata.webViewLink, '_blank');
-                  } else {
-                      setDriveError('Could not find a view link even after fetching metadata.');
-                  }
+                  if (metadata.webViewLink) window.open(metadata.webViewLink, '_blank');
+                  else setDriveError('Could not find a view link.');
               } catch (error) {
-                  console.error("Error getting statement metadata via GAPI:", error);
+                  console.error("Error getting statement metadata:", error);
                   const errorDetails = error.result?.error?.message || error.message || 'Unknown error';
                   setDriveError(`Failed to get statement link: ${errorDetails}`);
               }
@@ -458,55 +461,74 @@ const ContestPage = () => {
   };
 
 
-  // --- Download Test Case Input File (Using GAPI) ---
+  // --- Download Test Case Input File (Using GAPI and Map) ---
   const handleDownloadInputClick = async () => {
-    if (!testCaseInputFile || !isSignedIn) return; // Need to be signed in
+    // Get the input file object from the map
+    const currentFiles = testCaseFilesMap[selectedMilestone]?.[selectedTestCase];
+    const inputFile = currentFiles?.input;
+
+    if (!inputFile || !isSignedIn) {
+        setDriveError("Input file not found for this selection or not signed in.");
+        return;
+    }
 
     setIsDownloadingInput(true);
     setDriveError(null);
 
     try {
-        // Use gapi.client.drive.files.get with alt=media
         const response = await gapi.client.drive.files.get({
-            fileId: testCaseInputFile.id,
+            fileId: inputFile.id, // Use the input file ID
             alt: 'media'
         });
+        const fileContent = response.body;
+        if (typeof fileContent !== 'string') throw new Error('Invalid content received.');
 
-        const fileContent = response.body; // The raw file content string
+        let blob;
+        let mimeType = 'application/octet-stream'; // Default MIME type
+        const fileName = inputFile.name || `M${selectedMilestone}_T${selectedTestCase}_input`; // Use input file name
+        const fileExtension = fileName.split('.').pop()?.toLowerCase();
 
-        if (typeof fileContent !== 'string') {
-            throw new Error('Invalid content received from Google Drive API.');
+        if (fileExtension === 'csv') {
+            // CSV: Parse, filter answer column, unparse
+            const parseResult = await parseCsv(fileContent);
+            if (!Array.isArray(parseResult)) throw new Error('Failed to parse CSV.');
+            const filteredData = parseResult.map(row => {
+                const newRow = { ...row };
+                // Only delete if the column name is defined and exists
+                if (EXPECTED_OUTPUT_COLUMN && EXPECTED_OUTPUT_COLUMN in newRow) {
+                    delete newRow[EXPECTED_OUTPUT_COLUMN];
+                }
+                return newRow;
+            });
+            const filteredCsvString = Papa.unparse(filteredData);
+            mimeType = 'text/csv;charset=utf-8;';
+            blob = new Blob([filteredCsvString], { type: mimeType });
+        } else if (fileExtension === 'json') {
+            // JSON: Download as is
+            mimeType = 'application/json;charset=utf-8;';
+            blob = new Blob([fileContent], { type: mimeType });
+        } else if (fileExtension === 'txt') {
+            // TXT: Download as is
+            mimeType = 'text/plain;charset=utf-8;';
+            blob = new Blob([fileContent], { type: mimeType });
+        } else {
+            // Other types: Download as is with default MIME type
+             console.warn(`Downloading file with unknown extension '${fileExtension}' as octet-stream.`);
+             blob = new Blob([fileContent], { type: mimeType });
         }
 
-        // Parse the fetched content to filter out the expected output column
-        const parseResult = await parseCsv(fileContent);
-        if (!Array.isArray(parseResult)) {
-             throw new Error('Failed to parse the downloaded CSV data.');
-        }
-
-        // Create a new array of objects, omitting the expected output column
-        const filteredData = parseResult.map(row => {
-            const newRow = { ...row };
-            delete newRow[EXPECTED_OUTPUT_COLUMN]; // Remove the answer column
-            return newRow;
-        });
-
-        // Unparse the filtered data back into a CSV string
-        const filteredCsvString = Papa.unparse(filteredData);
-
-        // Create blob from the filtered CSV string
-        const blob = new Blob([filteredCsvString], { type: 'text/csv;charset=utf-8;' });
+        // Create download link
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = testCaseInputFile.name || `contest_${id}_input.csv`;
+        a.download = fileName; // Use the original file name
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
 
     } catch (error) {
-        console.error("Error downloading input file via GAPI:", error);
+        console.error("Error downloading input file:", error);
         const errorDetails = error.result?.error?.message || error.message || 'An unknown error occurred.';
         setDriveError(`Error downloading input file: ${errorDetails}`);
     } finally {
@@ -515,27 +537,22 @@ const ContestPage = () => {
   };
 
   const handleUploadClick = () => {
-    // Reset previous state before opening file dialog
     setUploadedFile(null);
     setScore(null);
     setDriveError(null);
-    fileInputRef.current.value = null; // Allow selecting the same file again
+    fileInputRef.current.value = null; 
     fileInputRef.current.click();
   };
 
   // Helper function to parse CSV data using PapaParse
-  const parseCsv = (fileOrString) => {
+  // Added 'parseWithHeader' option
+  const parseCsv = (fileOrString, parseWithHeader = true) => {
     return new Promise((resolve, reject) => {
       Papa.parse(fileOrString, {
-        header: true, // Use the first row as headers
+        header: parseWithHeader, // Use the provided option
         skipEmptyLines: true,
         complete: (results) => {
-          if (results.errors.length > 0) {
-            console.error("CSV Parsing Errors:", results.errors);
-            // Try to resolve with data anyway, but log error
-            // reject(new Error(`CSV Parsing Error: ${results.errors[0].message}`));
-          }
-          // Ensure data is an array, even if parsing failed partially
+          if (results.errors.length > 0) console.error("CSV Parsing Errors:", results.errors);
           resolve(Array.isArray(results.data) ? results.data : []);
         },
         error: (error) => {
@@ -546,235 +563,238 @@ const ContestPage = () => {
     });
   };
 
+  // Helper function for deep equality check (for JSON comparison)
+  const deepEqual = (obj1, obj2) => {
+    if (obj1 === obj2) return true;
 
-  // Function to calculate score (Using GAPI for expected output) & Record Completion
+    if (obj1 === null || typeof obj1 !== "object" || obj2 === null || typeof obj2 !== "object") {
+      return false;
+    }
+
+    const keys1 = Object.keys(obj1);
+    const keys2 = Object.keys(obj2);
+
+    if (keys1.length !== keys2.length) return false;
+
+    for (const key of keys1) {
+      if (!keys2.includes(key) || !deepEqual(obj1[key], obj2[key])) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+
+  // Function to calculate score (Handles CSV, JSON, TXT using Map) & Record Completion
   const calculateScore = async (userFile) => {
-      if (!userFile || !testCaseInputFile || !isSignedIn) {
-          setDriveError("Missing user file, test case file information, or not signed in.");
+      // Get the OUTPUT file object from the map
+      const currentFiles = testCaseFilesMap[selectedMilestone]?.[selectedTestCase];
+      const expectedOutputFile = currentFiles?.output;
+
+      if (!userFile || !expectedOutputFile || !isSignedIn) {
+          setDriveError("User file, expected output file not found for this selection, or not signed in.");
           return;
       }
 
-      setIsUploading(true); // Use isUploading state to indicate scoring process
+      setIsUploading(true);
       setScore(null);
       setDriveError(null);
-
       try {
-          // 1. Fetch expected data from Google Drive using GAPI
-          const driveResponse = await gapi.client.drive.files.get({
-              fileId: testCaseInputFile.id,
-              alt: 'media'
-          });
-          // No console.log here as response body can be large
-          const expectedCsvString = driveResponse.body;
-          if (typeof expectedCsvString !== 'string') {
-              throw new Error('Invalid expected output content received from Google Drive API.');
+          // Fetch expected OUTPUT data from Google Drive
+          const driveResponse = await gapi.client.drive.files.get({ fileId: expectedOutputFile.id, alt: 'media' });
+          const expectedFileContent = driveResponse.body;
+          if (typeof expectedFileContent !== 'string') throw new Error('Invalid expected output content received.');
+
+          // Read user's uploaded file
+          const userFileContent = await userFile.text();
+
+          // Determine file type from the expected OUTPUT file's name
+          const fileName = expectedOutputFile.name || '';
+          const fileExtension = fileName.split('.').pop()?.toLowerCase();
+
+          let calculatedScore = 0; // Default score
+
+          switch (fileExtension) {
+              case 'csv':
+                  // --- CSV Comparison ---
+                  // Always parse with headers and compare based on headers
+
+                  const [expectedData, userData] = await Promise.all([
+                      parseCsv(expectedFileContent, true), // Always parse with header: true
+                      parseCsv(userFileContent, true)      // Always parse with header: true
+                  ]);
+
+                  // PapaParse with header:true returns an array of objects
+                  if (!Array.isArray(expectedData) || !Array.isArray(userData)) throw new Error("Parsed CSV data is not in array format.");
+                  if (expectedData.length === 0) throw new Error("Expected CSV output file is empty or could not be parsed.");
+                  if (userData.length === 0) throw new Error("Your uploaded CSV file is empty or could not be parsed.");
+
+                  // Warn about row mismatch but proceed
+                  if (userData.length !== expectedData.length) {
+                      console.warn(`CSV Row count mismatch: Expected ${expectedData.length}, User ${userData.length}. Scoring based on common rows.`);
+                  }
+
+                  let correctMatches = 0;
+                  const comparisonLength = Math.min(userData.length, expectedData.length);
+
+                  for (let i = 0; i < comparisonLength; i++) {
+                      // Compare row objects based on expected headers (parsed with headers)
+                      const userRowObj = userData[i];
+                      const expectedRowObj = expectedData[i];
+
+                          // Ensure both are valid objects
+                          if (typeof userRowObj !== 'object' || userRowObj === null || typeof expectedRowObj !== 'object' || expectedRowObj === null) {
+                              console.warn(`Row ${i+1} skipped: Invalid row data structure.`);
+                              continue; // Skip this row
+                          }
+
+                          // Get headers from the first expected row (assume consistent headers)
+                          const expectedHeaders = expectedData.length > 0 ? Object.keys(expectedData[0]) : [];
+                          if (expectedHeaders.length === 0) {
+                               console.warn(`Row ${i+1} skipped: Cannot determine expected headers.`);
+                               continue; // Skip if no headers
+                          }
+
+                          let rowMatch = true;
+                          // Check if user row has the same headers and compare values
+                          if (Object.keys(userRowObj).length !== expectedHeaders.length) {
+                              rowMatch = false; // Different number of columns
+                          } else {
+                              for (const header of expectedHeaders) {
+                                  if (!userRowObj.hasOwnProperty(header)) {
+                                      rowMatch = false; // User row missing an expected header
+                                      break;
+                                  }
+                                  const userCell = String(userRowObj[header] ?? '').trim();
+                                  const expectedCell = String(expectedRowObj[header] ?? '').trim();
+                                  if (userCell !== expectedCell) {
+                                      rowMatch = false;
+                                      // Optional: Log specific cell mismatch
+                                      // console.log(`Row ${i+1}, Header '${header}': Expected '${expectedCell}', Got '${userCell}'`);
+                                      break; // No need to check further cells in this row
+                                  }
+                              }
+                          }
+
+                          if (rowMatch) {
+                              correctMatches++;
+                          } else {
+                               // Optional: Log row mismatch details
+                               // console.log(`Row ${i+1} mismatch: Expected ${JSON.stringify(expectedRowObj)}, Got ${JSON.stringify(userRowObj)}`);
+                          }
+                      // Removed the outer if/else based on compareSpecificColumns
+                      // Removed extra brace here
+                  }
+                  // Score based on expected length
+                  calculatedScore = expectedData.length > 0 ? (correctMatches / expectedData.length) * 100 : 0;
+                  break;
+
+              case 'json':
+                  // --- JSON Comparison ---
+                  try {
+                      const expectedJson = JSON.parse(expectedFileContent);
+                      const userJson = JSON.parse(userFileContent);
+                      if (deepEqual(expectedJson, userJson)) {
+                          calculatedScore = 100;
+                      } else {
+                          calculatedScore = 0;
+                          console.log("JSON Comparison Failed: Objects are not deeply equal.");
+                          // Optional: Log differences for debugging (can be complex)
+                      }
+                  } catch (jsonError) {
+                      throw new Error(`Failed to parse JSON: ${jsonError.message}`);
+                  }
+                  break;
+
+              case 'txt':
+                  // --- TXT Comparison ---
+                  // Trim whitespace from both ends of the entire content for comparison
+                  if (userFileContent.trim() === expectedFileContent.trim()) {
+                      calculatedScore = 100;
+                  } else {
+                      calculatedScore = 0;
+                      console.log("TXT Comparison Failed: Content does not match.");
+                  }
+                  break;
+
+              default:
+                  throw new Error(`Unsupported file type for scoring: .${fileExtension}`);
           }
-          // console.log("Fetched expected CSV string length:", expectedCsvString.length); // Avoid logging potentially large string
 
-          // 2. Read user's uploaded file
-          const userCsvString = await userFile.text();
-
-          // 3. Parse both CSVs
-          const [expectedData, userData] = await Promise.all([
-              parseCsv(expectedCsvString),
-              parseCsv(userCsvString)
-          ]);
-
-
-          // 4. Compare and Score
-          if (!Array.isArray(expectedData) || !Array.isArray(userData)) {
-              throw new Error("Parsed data is not in the expected array format.");
-          }
-          if (expectedData.length === 0) {
-              throw new Error("Expected output file is empty or could not be parsed correctly.");
-          }
-           if (userData.length === 0) {
-              throw new Error("Your uploaded file is empty or could not be parsed correctly.");
-          }
-          // Check for header presence (simple check for expected column name)
-          if (!expectedData[0] || !(EXPECTED_OUTPUT_COLUMN in expectedData[0])) {
-               throw new Error(`Missing required header '${EXPECTED_OUTPUT_COLUMN}' in the expected output file.`);
-          }
-           if (!userData[0] || !(USER_ANSWER_COLUMN in userData[0])) {
-               throw new Error(`Missing required header '${USER_ANSWER_COLUMN}' in your uploaded file.`);
-          }
-
-          if (userData.length !== expectedData.length) {
-              console.warn(`Row count mismatch: Expected ${expectedData.length}, User ${userData.length}. Scoring based on common rows.`);
-              // Optional: Set an error or just score based on the shorter length
-              // setDriveError(`Row count mismatch: Expected ${expectedData.length}, User ${userData.length}.`);
-          }
-
-          let correctMatches = 0;
-          const comparisonLength = Math.min(userData.length, expectedData.length);
-
-          for (let i = 0; i < comparisonLength; i++) {
-              const userRow = userData[i];
-              const expectedRow = expectedData[i];
-
-              // Compare values (trim whitespace and treat as strings for simple comparison)
-              const userAnswer = String(userRow[USER_ANSWER_COLUMN] ?? '').trim();
-              const expectedAnswer = String(expectedRow[EXPECTED_OUTPUT_COLUMN] ?? '').trim();
-
-              if (userAnswer === expectedAnswer) {
-                  correctMatches++;
-              }
-          }
-
-          // Calculate score (percentage based on expected length)
-          const calculatedScore = (correctMatches / expectedData.length) * 100;
           setScore(calculatedScore);
 
-          // Declare updatedProgress here to make it accessible later
-          let updatedProgress = null; 
-
           // --- Record Score (Always) ---
+          let updatedProgress = null;
           try {
             const token = gapi.auth2.getAuthInstance().currentUser.get().getAuthResponse().id_token;
             const completionResponse = await fetch(`${API_BASE_URL}/api/completion`, {
                 method: 'POST',
-                headers: {
-                  'Authorization': `Bearer ${token}`,
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                  contestId: id,
-                  milestoneId: selectedMilestone,
-                  testcaseId: selectedTestCase,
-                  score: calculatedScore // Add the score here
-                }),
+                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ contestId: id, milestoneId: selectedMilestone, testcaseId: selectedTestCase, score: calculatedScore }),
               });
-
               if (!completionResponse.ok) {
                 const errorData = await completionResponse.json();
                 throw new Error(errorData.error || `Failed to record completion (HTTP ${completionResponse.status})`);
               }
-              
               const result = await completionResponse.json();
-              // Assign the result to the higher-scoped variable
               updatedProgress = result.updatedProgress || {}; 
-              // Update local progress state immediately
               setCompletionStatus(updatedProgress);
-
-              // --- Ask user to advance to next test case ---
-
-              // Find the next available test case *before* asking
-              const currentMilestoneScores = updatedProgress[selectedMilestone] || {};
-                const discoveredTestCases = new Set();
-                allFiles.forEach(file => {
-                  const match = file.name?.match(TESTCASE_REGEX);
-                  if (match && match[1] === selectedMilestone) {
-                      discoveredTestCases.add(match[2]);
-                  }
-              });
-              const sortedDiscovered = Array.from(discoveredTestCases).sort((a, b) => parseInt(a) - parseInt(b));
-              const newlyAvailableTestCases = [];
-              for (const tc of sortedDiscovered) {
-                  const tcNum = parseInt(tc);
-                  if (tcNum === 1 || (currentMilestoneScores[String(tcNum - 1)] === 100)) {
-                      newlyAvailableTestCases.push(tc);
-                  } else {
-                      break;
-                  }
-              }
-
-              const currentTestCaseIndex = newlyAvailableTestCases.indexOf(selectedTestCase);
-              const hasNextTestCase = currentTestCaseIndex !== -1 && currentTestCaseIndex < newlyAvailableTestCases.length - 1;
-              const nextTestCase = hasNextTestCase ? newlyAvailableTestCases[currentTestCaseIndex + 1] : null;
-
-              // Ask for confirmation only if there is a next test case
-              if (hasNextTestCase && nextTestCase) {
-                  const proceed = window.confirm(`Score is 100! Proceed to Test Case ${nextTestCase}?`);
-                  if (proceed) {
-                      setSelectedTestCase(nextTestCase); // Update state to trigger UI change
-                      // Reset upload state for the new test case
-                      setUploadedFile(null);
-                      setScore(null); // Reset score *after* advancing
-                  } else {
-                      // Stay on the current test case, keep score displayed
-                  }
-              } else {
-                   // Stay on the current test case, keep score displayed
-              }
-              // --- End Ask user to advance ---
-
             } catch (completionError) {
-              // This is the catch block for the fetch /api/completion call
               console.error("Error recording completion:", completionError);
-              // Display error, but don't overwrite scoring error if one exists
               setDriveError(prev => prev ? `${prev}\nFailed to record completion: ${completionError.message}` : `Failed to record completion: ${completionError.message}`);
-            } // End of try...catch for recording score
-
-            // --- Ask user to advance ONLY if Score is 100% and recording was successful ---
-            if (calculatedScore === 100 && updatedProgress) { // Check if updatedProgress has a value
-                // Find the next available test case *using the updatedProgress*
-                const currentMilestoneScores = updatedProgress[selectedMilestone] || {};
-                const discoveredTestCases = new Set();
-                allFiles.forEach(file => {
-                    const match = file.name?.match(TESTCASE_REGEX);
-                    if (match && match[1] === selectedMilestone) {
-                        discoveredTestCases.add(match[2]);
-                    }
-                });
-                const sortedDiscovered = Array.from(discoveredTestCases).sort((a, b) => parseInt(a) - parseInt(b));
-                const newlyAvailableTestCases = [];
-                for (const tc of sortedDiscovered) {
-                    const tcNum = parseInt(tc);
-                    if (tcNum === 1 || (currentMilestoneScores[String(tcNum - 1)] === 100)) {
-                        newlyAvailableTestCases.push(tc);
-                    } else {
-                        break;
-                    }
-                }
-
-                const currentTestCaseIndex = newlyAvailableTestCases.indexOf(selectedTestCase);
-                const hasNextTestCase = currentTestCaseIndex !== -1 && currentTestCaseIndex < newlyAvailableTestCases.length - 1;
-                const nextTestCase = hasNextTestCase ? newlyAvailableTestCases[currentTestCaseIndex + 1] : null;
-
-                // Ask for confirmation only if there is a next test case
-                if (hasNextTestCase && nextTestCase) {
-                    const proceed = window.confirm(`Score is 100! Proceed to Test Case ${nextTestCase}?`);
-                    if (proceed) {
-                        setSelectedTestCase(nextTestCase); // Update state to trigger UI change
-                        // Reset upload state for the new test case
-                        setUploadedFile(null);
-                        setScore(null); // Reset score *after* advancing
-                    } else {
-                        // Stay on the current test case, keep score displayed
-                    }
-                } else {
-                    // Stay on the current test case, keep score displayed
-                }
-            } // End of if (calculatedScore === 100) for advancing logic
-            // --- End Ask user to advance ---
-
-          } catch (error) { // This catch is now for the outer try block (scoring calculation)
+            } 
+      } catch (error) { 
           console.error("Error during scoring:", error);
-          // Use consistent error message extraction
           const errorDetails = error.result?.error?.message || error.message || 'An unknown error occurred.';
           setDriveError(`Scoring Error: ${errorDetails}`);
-          setScore(null); // Ensure score is null on error
+          setScore(null); 
       } finally {
-          setIsUploading(false); // Scoring process finished
+          setIsUploading(false); 
       }
   };
 
 
-  // Updated handleFileChange to trigger scoring
+  // Updated handleFileChange to trigger scoring and accept multiple types
   const handleFileChange = async (e) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
+      const allowedExtensions = ['.csv', '.json', '.txt'];
+      const fileExtension = '.' + file.name.split('.').pop()?.toLowerCase();
 
-      // Check if file is CSV
-      if (file.type !== 'text/csv' && !file.name.endsWith('.csv')) {
-        alert('Please upload a CSV file');
-        return;
+      // Basic check for allowed extensions
+      if (!allowedExtensions.includes(fileExtension)) {
+         setDriveError(`Invalid file type. Please upload a CSV, JSON, or TXT file. You uploaded: ${file.name}`);
+         setUploadedFile(null); // Clear any previously selected file
+         fileInputRef.current.value = null; // Reset file input
+         return;
       }
 
       setUploadedFile(file); // Set the file state immediately for UI feedback
       await calculateScore(file); // Trigger scoring process
     }
   };
+
+  // Handler for the "Proceed to Next Test Case" button
+  const handleProceedToNextTestCase = (nextId) => { // Accept nextId as argument
+    if (nextId) {
+      setSelectedTestCase(nextId);
+      // Reset states for the new test case
+      setUploadedFile(null);
+      // setScore(null); // Let score naturally update/clear based on new context
+      setDriveError(null); // Clear previous errors
+    }
+  };
+
+  // --- Calculate next test case ID for rendering using useMemo (using map keys) ---
+  const nextIdToProceed = useMemo(() => {
+      if (score !== 100) return null;
+      const currentMilestoneTestCases = testCaseFilesMap[selectedMilestone] ? Object.keys(testCaseFilesMap[selectedMilestone]) : [];
+      if (!selectedMilestone || !selectedTestCase || currentMilestoneTestCases.length === 0 || !completionStatus[selectedMilestone]) {
+          return null;
+      }
+      // Pass the array of test case IDs for the current milestone
+      return findNextTestCaseId(completionStatus[selectedMilestone], currentMilestoneTestCases, selectedTestCase);
+  }, [score, completionStatus, selectedMilestone, selectedTestCase, testCaseFilesMap]); // Dependencies for the calculation
 
   return (
     <div className="contest-container">
@@ -832,20 +852,19 @@ const ContestPage = () => {
               value={selectedTestCase}
               onChange={handleTestCaseChange}
               className="select-input"
-              disabled={availableTestCases.length === 0} // Disable if no test cases available/unlocked
+              disabled={availableTestCases.length === 0} // Disable if no test cases discovered
             >
                <option value="" disabled>-- Select Test Case --</option>
-              {/* Map over available (unlocked) test cases and add checkmark if solved */}
-              {availableTestCases.map(t => {
-                // Explicitly check if the score for this milestone/testcase is exactly 100
-                // If a checkmark appears unexpectedly, it means completionStatus contains this score
+              {/* Map over all discovered test cases, showing lock/check status */}
+              {availableTestCases.map(tc => {
                 const milestoneProgress = completionStatus ? completionStatus[selectedMilestone] : undefined;
-                const testCaseScore = milestoneProgress ? milestoneProgress[t] : undefined;
+                const testCaseScore = milestoneProgress ? milestoneProgress[tc.id] : undefined;
                 const isSolved = testCaseScore === 100;
-                // console.log(`Checkmark debug: M=${selectedMilestone}, T=${t}, Score=${testCaseScore}, isSolved=${isSolved}`); // Keep for debugging if needed
+                const isLocked = tc.locked;
+
                 return (
-                  <option key={t} value={t}>
-                    {isSolved ? '✓ ' : ''}Test Case {t}
+                  <option key={tc.id} value={tc.id} disabled={isLocked}>
+                    {isLocked ? '🔒 ' : isSolved ? '✓ ' : ''}Test Case {tc.id}
                   </option>
                 );
               })}
@@ -880,17 +899,32 @@ const ContestPage = () => {
                 {/* <div className="selectors-container"> ... </div> */}
 
             {/* Removed duplicate milestone-details div */}
-            {/* Display file names if found */}
-            <div className="file-info-display"> {/* Optional: Wrap file info */}
+            {/* Display file names derived from map */}
+            <div className="file-info-display">
                 {problemStatementFile && <p>Problem Statement: <strong>{problemStatementFile.name}</strong></p>}
-                {testCaseInputFile && <p>Input/Output File: <strong>{testCaseInputFile.name}</strong></p>}
-                {/* Show warnings if specific files for selection are missing */}
-                {!problemStatementFile && selectedMilestone && <p className="warning-message">Problem statement PDF for Milestone {selectedMilestone} not found.</p>}
-                {!testCaseInputFile && selectedMilestone && selectedTestCase && <p className="warning-message">Test case CSV for M{selectedMilestone} T{selectedTestCase} not found.</p>}
+                {/* Derive input/output files from map for display */}
+                {selectedMilestone && selectedTestCase && testCaseFilesMap[selectedMilestone]?.[selectedTestCase] ? (
+                    <>
+                        {testCaseFilesMap[selectedMilestone][selectedTestCase].input ? (
+                             <p>Input File: <strong>{testCaseFilesMap[selectedMilestone][selectedTestCase].input.name}</strong></p>
+                        ) : (
+                             <p className="warning-message">Input file for M{selectedMilestone} T{selectedTestCase} not found.</p>
+                        )}
+                         {testCaseFilesMap[selectedMilestone][selectedTestCase].output ? (
+                             <p>Expected Output File: <strong>{testCaseFilesMap[selectedMilestone][selectedTestCase].output.name}</strong></p>
+                         ) : (
+                             <p className="warning-message">Output file for M{selectedMilestone} T{selectedTestCase} not found.</p>
+                         )}
+                    </>
+                ) : (
+                     selectedMilestone && selectedTestCase && <p className="warning-message">Test case files for M{selectedMilestone} T{selectedTestCase} not found in map.</p>
+                )}
+                 {/* Show warning if problem statement PDF is missing */}
+                 {!problemStatementFile && selectedMilestone && <p className="warning-message">Problem statement PDF for Milestone {selectedMilestone} not found.</p>}
             </div>
 
             <div className="contest-actions">
-               {/* Download Problem Statement Button */}
+               {/* Download Problem Statement Button (remains the same) */}
                <button
                  className="download-button statement-button"
                  onClick={handleDownloadStatementClick}
@@ -899,30 +933,30 @@ const ContestPage = () => {
                  {isDownloadingStatement ? 'Opening...' : 'Download Problem Statement'}
                </button>
 
-              {/* Download Input File Button */}
+              {/* Download Input File Button (disables based on input file from map) */}
               <button
                 className="download-button"
                 onClick={handleDownloadInputClick}
-                disabled={isDownloadingInput || !testCaseInputFile?.id || !isSignedIn}
+                disabled={isDownloadingInput || !testCaseFilesMap[selectedMilestone]?.[selectedTestCase]?.input?.id || !isSignedIn}
               >
                 {isDownloadingInput ? 'Downloading...' : 'Download Input File'}
               </button>
-          
-              {/* Upload Output File Button */}
+
+              {/* Upload Output File Button (disables based on output file from map, as scoring needs it) */}
               <button
                 className="upload-button"
                 onClick={handleUploadClick}
-                disabled={isUploading || !testCaseInputFile?.id || !isSignedIn}
+                disabled={isUploading || !testCaseFilesMap[selectedMilestone]?.[selectedTestCase]?.output?.id || !isSignedIn}
               >
-                {isUploading ? 'Scoring...' : 'Upload & Score Output'}
+                {isUploading ? 'Scoring...' : 'Upload Your Output & Score'}
               </button>
           
               <input
-            type="file" 
-            ref={fileInputRef} 
-            onChange={handleFileChange} 
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileChange}
             style={{ display: 'none' }}
-            accept=".csv"
+            accept=".csv,.json,.txt" // Accept multiple file types
           />
         </div>
         
@@ -943,11 +977,23 @@ const ContestPage = () => {
           </div>
         )}
 
-                 {/* Score Display */}
+                 {/* Score Display & Proceed Button */}
                  {score !== null && !isUploading && (
                      <div className="score-display">
                          <h2>Your Score:</h2>
                          <p className="score-value">{score.toFixed(2)} / 100</p>
+                         {/* Calculate and render confirmation inline using useMemo result */}
+                         {nextIdToProceed && (
+                             <div className="proceed-confirmation">
+                                 <p>Score is 100%! Ready for the next challenge?</p>
+                                 <button
+                                     onClick={() => handleProceedToNextTestCase(nextIdToProceed)} // Pass ID here
+                                     className="proceed-button"
+                                 >
+                                     Proceed to Test Case {nextIdToProceed}
+                                 </button>
+                             </div>
+                         )}
                      </div>
                  )}
                 </>
