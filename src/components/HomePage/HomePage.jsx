@@ -60,7 +60,7 @@ const HomePage = () => {
         {error && <p className="home-error">{error}</p>}
         
         <div className="home-footer">
-          <p>Need help? <a href="#" className="support-link">Contact Support</a></p>
+          <p>Need help? <button onClick={() => alert('Support contact not implemented yet.')} className="support-link button-as-link">Contact Support</button></p>
         </div>
       </div>
     </div>

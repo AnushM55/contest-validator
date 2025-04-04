@@ -194,3 +194,22 @@ body {
     font-size: 14px;
   }
 }
+
+/* Styles for button styled as a link */
+.button-as-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: #6e8efb; /* Match existing link color */
+  text-decoration: underline;
+  cursor: pointer;
+  vertical-align: baseline; /* Align with surrounding text */
+}
+
+.button-as-link:hover,
+.button-as-link:focus {
+  color: #a777e3; /* Match existing link hover color */
+  text-decoration: underline; /* Keep underline on hover/focus */
+  outline: none; /* Remove default focus outline */
+}
