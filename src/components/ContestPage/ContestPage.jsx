@@ -1,5 +1,5 @@
 import { useParams, Link } from 'react-router-dom';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react'; // Import useCallback
 import { gapi } from 'gapi-script'; // Import gapi-script
 import Papa from 'papaparse';
 import './ContestPage.css';
@@ -62,7 +62,6 @@ const ContestPage = () => {
   // Handler for Milestone dropdown change
   const handleMilestoneChange = (e) => {
     const newMilestone = e.target.value;
-    console.log("Milestone selected:", newMilestone);
     setSelectedMilestone(newMilestone);
     // Test cases and selected files will be updated by the useEffect hooks
     // Resetting selected test case here might cause a brief inconsistent state,
@@ -72,7 +71,6 @@ const ContestPage = () => {
   // Handler for Test Case dropdown change
   const handleTestCaseChange = (e) => {
     const newTestCase = e.target.value;
-    console.log("Test Case selected:", newTestCase);
     setSelectedTestCase(newTestCase);
     // Selected files will be updated by the useEffect hook depending on selectedTestCase
   };
@@ -88,7 +86,6 @@ const ContestPage = () => {
           scope: SCOPES,
         });
         setIsGapiLoaded(true);
-        console.log("GAPI client initialized.");
 
         // Listen for sign-in state changes.
         gapi.auth2.getAuthInstance().isSignedIn.listen(updateSigninStatus);
@@ -107,7 +104,6 @@ const ContestPage = () => {
       setIsAuthLoading(false); // Initial auth check complete
       setAuthError(null); // Clear previous auth errors on status change
       if (signedIn) {
-        console.log("User is signed in.");
         // Get user profile information
         const profile = gapi.auth2.getAuthInstance().currentUser.get().getBasicProfile();
         setUserName(profile.getName());
@@ -120,7 +116,6 @@ const ContestPage = () => {
         // Fetch progress when user signs in
         fetchProgress(id); 
       } else {
-        console.log("User is signed out.");
         setUserName('');
         // Clear data when user signs out
         setProblemStatementFile(null);
@@ -135,8 +130,11 @@ const ContestPage = () => {
 
     // Load the GAPI client and auth2 module
     gapi.load('client:auth2', initClient);
-
-  }, []); // Run only once on component mount
+  // eslint-disable-next-line react-hooks/exhaustive-deps 
+  }, [id]); // Add id as dependency (fetchProgress depends on it indirectly via updateSigninStatus)
+  // Note: fetchProgress and updateSigninStatus are defined inside useEffect or are stable, 
+  // but adding id covers the case where the component might remount with a different id.
+  // If fetchProgress were defined outside and not memoized, it would also need to be added.
 
   // --- Sign-in/Sign-out Handlers ---
   const handleAuthClick = () => {
@@ -176,7 +174,6 @@ const ContestPage = () => {
       setAllFiles([]); // Clear previous file list
 
       try {
-        console.log(`Fetching all files from folder: ${CONTEST_FOLDER_ID} using GAPI`);
         let allFetchedFiles = [];
         let pageToken = undefined;
         // Loop to handle pagination if there are many files
@@ -196,7 +193,6 @@ const ContestPage = () => {
           pageToken = result.nextPageToken;
         } while (pageToken);
 
-        console.log("Total files fetched via GAPI:", allFetchedFiles.length, allFetchedFiles);
         setAllFiles(allFetchedFiles); // Store all files
 
         // Parse filenames to find available milestones
@@ -214,7 +210,6 @@ const ContestPage = () => {
 
         const sortedMilestones = Array.from(milestonesSet).sort((a, b) => parseInt(a) - parseInt(b));
         setAvailableMilestones(sortedMilestones);
-        console.log("Available Milestones:", sortedMilestones);
 
         // Set the first milestone as selected by default
         if (sortedMilestones.length > 0) {
@@ -248,11 +243,13 @@ const ContestPage = () => {
   }, [isGapiLoaded, isSignedIn]); // Dependency: only run when auth state changes
 
 
-  // --- Fetch User Progress ---
-  const fetchProgress = async (contestId) => {
-    if (!isSignedIn || !isGapiLoaded) return; // Need to be signed in
+  // --- Fetch User Progress (Memoized) ---
+  // Define fetchProgress outside the useEffect that calls it
+  const fetchProgress = useCallback(async (contestId) => {
+    // Check dependencies directly inside useCallback
+    // Ensure contestId is valid before proceeding
+    if (!isSignedIn || !isGapiLoaded || !API_BASE_URL || !contestId) return; 
 
-    console.log(`Fetching progress for contest ${contestId}`);
     try {
       const token = gapi.auth2.getAuthInstance().currentUser.get().getAuthResponse().id_token;
       const response = await fetch(`${API_BASE_URL}/api/progress/${contestId}`, {
@@ -265,19 +262,76 @@ const ContestPage = () => {
         throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
       }
       const progressData = await response.json();
-      console.log("Received progress data:", progressData);
       setCompletionStatus(progressData || {}); // Ensure it's an object
     } catch (error) {
       console.error("Error fetching progress:", error);
       setDriveError(`Failed to fetch progress: ${error.message}`); // Use driveError state for simplicity
       setCompletionStatus({}); // Reset progress on error
     }
-  };
+  // Add dependencies for useCallback
+  }, [isSignedIn, isGapiLoaded, API_BASE_URL]); 
 
-  // Fetch progress initially when signed in, or if contest ID changes (though it doesn't here)
+  // --- Google API Initialization and Auth Handling ---
+  // Define updateSigninStatus outside useEffect, memoize with useCallback
+  const updateSigninStatus = useCallback((signedIn) => {
+    setIsSignedIn(signedIn);
+    setIsAuthLoading(false); // Initial auth check complete
+    setAuthError(null); // Clear previous auth errors on status change
+    if (signedIn) {
+      // Get user profile information
+      const profile = gapi.auth2.getAuthInstance().currentUser.get().getBasicProfile();
+      setUserName(profile.getName());
+      // Clear file/score state from previous sessions/users
+      setProblemStatementFile(null);
+      setTestCaseInputFile(null);
+      setUploadedFile(null);
+      setScore(null);
+      setDriveError(null);
+      // Fetch progress when user signs in - use the id from component scope
+      if (id) { // Ensure id is available
+        fetchProgress(id); 
+      }
+    } else {
+      setUserName('');
+      // Clear data when user signs out
+      setProblemStatementFile(null);
+      setTestCaseInputFile(null);
+      setUploadedFile(null);
+      setScore(null);
+      setDriveError(null);
+      setIsLoadingFiles(false); // Stop file loading if user signs out
+      setCompletionStatus({}); // Clear progress on sign out
+    }
+  // Dependencies for updateSigninStatus
+  }, [id, fetchProgress, setUserName, setIsSignedIn, setIsAuthLoading, setAuthError, setProblemStatementFile, setTestCaseInputFile, setUploadedFile, setScore, setDriveError, setIsLoadingFiles, setCompletionStatus]); 
+
   useEffect(() => {
-     fetchProgress(id);
-  }, [isSignedIn, isGapiLoaded, id]);
+    const initClient = async () => {
+      try {
+        await gapi.client.init({
+          apiKey: API_KEY,
+          clientId: CLIENT_ID,
+          discoveryDocs: DISCOVERY_DOCS,
+          scope: SCOPES,
+        });
+        setIsGapiLoaded(true);
+
+        // Listen for sign-in state changes.
+        gapi.auth2.getAuthInstance().isSignedIn.listen(updateSigninStatus);
+
+        // Handle the initial sign-in state.
+        updateSigninStatus(gapi.auth2.getAuthInstance().isSignedIn.get());
+      } catch (error) {
+        console.error("Error initializing GAPI client:", error);
+        setAuthError(`Error initializing Google API: ${error.message || JSON.stringify(error)}`);
+        setIsAuthLoading(false); // Stop loading on error
+      }
+    };
+
+    // Load the GAPI client and auth2 module
+    gapi.load('client:auth2', initClient);
+  // Add updateSigninStatus (now stable) to dependency array
+  }, [updateSigninStatus]); 
 
 
   // --- Effect to Update Test Cases when Milestone Changes (incorporates progress) ---
@@ -288,7 +342,6 @@ const ContestPage = () => {
       return;
     }
 
-    console.log(`Updating test cases for Milestone ${selectedMilestone} with progress:`, completionStatus);
     // Get the scores for the current milestone, default to empty object
     const milestoneScores = completionStatus[selectedMilestone] || {}; 
     const discoveredTestCases = new Set();
@@ -321,7 +374,6 @@ const ContestPage = () => {
     }
 
     setAvailableTestCases(unlockedTestCases);
-    console.log(`Available Test Cases for M${selectedMilestone} (considering 100% score):`, unlockedTestCases);
 
     // Select the first *unlocked* test case, or clear selection if none are available/unlocked
     if (unlockedTestCases.length > 0) {
@@ -337,7 +389,7 @@ const ContestPage = () => {
     setUploadedFile(null);
     // setScore(null); // Remove score reset here
 
-  }, [selectedMilestone, allFiles, completionStatus]); // Re-run when milestone, files, or progress changes
+  }, [selectedMilestone, allFiles, completionStatus, selectedTestCase]); // Keep selectedTestCase here
 
 
   // --- Effect to Update Selected Files based on M/T selection ---
@@ -348,7 +400,6 @@ const ContestPage = () => {
       return;
     }
 
-    console.log(`Finding files for M${selectedMilestone} T${selectedTestCase}`);
     // Find the corresponding problem statement PDF
     const pdf = allFiles.find(file => {
         const match = file.name?.match(PROBLEM_REGEX);
@@ -378,12 +429,10 @@ const ContestPage = () => {
 
       setIsDownloadingStatement(true);
       setDriveError(null);
-      console.log("Attempting to download/view statement:", problemStatementFile);
 
       // Simplest approach: Open the webViewLink which should always be available
       // Direct download via webContentLink or fetch requires more complex token handling/CORS
       if (problemStatementFile.webViewLink) {
-          console.log("Opening webViewLink:", problemStatementFile.webViewLink);
           window.open(problemStatementFile.webViewLink, '_blank');
       } else {
           console.warn("No webViewLink found for:", problemStatementFile.id);
@@ -395,7 +444,6 @@ const ContestPage = () => {
                   });
                   const metadata = response.result;
                   if (metadata.webViewLink) {
-                      console.log("Opening link from explicit metadata fetch:", metadata.webViewLink);
                       window.open(metadata.webViewLink, '_blank');
                   } else {
                       setDriveError('Could not find a view link even after fetching metadata.');
@@ -416,7 +464,6 @@ const ContestPage = () => {
 
     setIsDownloadingInput(true);
     setDriveError(null);
-    console.log("Attempting to download input file via GAPI:", testCaseInputFile);
 
     try {
         // Use gapi.client.drive.files.get with alt=media
@@ -425,7 +472,6 @@ const ContestPage = () => {
             alt: 'media'
         });
 
-        console.log("GAPI get file content response:", response);
         const fileContent = response.body; // The raw file content string
 
         if (typeof fileContent !== 'string') {
@@ -458,7 +504,6 @@ const ContestPage = () => {
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-        console.log("Input file download initiated via GAPI:", a.download);
 
     } catch (error) {
         console.error("Error downloading input file via GAPI:", error);
@@ -509,14 +554,12 @@ const ContestPage = () => {
           return;
       }
 
-      console.log("Starting score calculation...");
       setIsUploading(true); // Use isUploading state to indicate scoring process
       setScore(null);
       setDriveError(null);
 
       try {
           // 1. Fetch expected data from Google Drive using GAPI
-          console.log("Fetching expected data from Drive via GAPI:", testCaseInputFile.id);
           const driveResponse = await gapi.client.drive.files.get({
               fileId: testCaseInputFile.id,
               alt: 'media'
@@ -530,16 +573,12 @@ const ContestPage = () => {
 
           // 2. Read user's uploaded file
           const userCsvString = await userFile.text();
-          console.log("Read user CSV string length:", userCsvString.length);
 
           // 3. Parse both CSVs
-          console.log("Parsing CSVs...");
           const [expectedData, userData] = await Promise.all([
               parseCsv(expectedCsvString),
               parseCsv(userCsvString)
           ]);
-          console.log("Parsed Expected Data (first 5 rows):", expectedData.slice(0, 5));
-          console.log("Parsed User Data (first 5 rows):", userData.slice(0, 5));
 
 
           // 4. Compare and Score
@@ -584,14 +623,12 @@ const ContestPage = () => {
 
           // Calculate score (percentage based on expected length)
           const calculatedScore = (correctMatches / expectedData.length) * 100;
-          console.log(`Score calculated: ${correctMatches} / ${expectedData.length} = ${calculatedScore}`);
           setScore(calculatedScore);
 
           // Declare updatedProgress here to make it accessible later
           let updatedProgress = null; 
 
           // --- Record Score (Always) ---
-          console.log(`Recording score (${calculatedScore}) for M${selectedMilestone} T${selectedTestCase}`);
           try {
             const token = gapi.auth2.getAuthInstance().currentUser.get().getAuthResponse().id_token;
             const completionResponse = await fetch(`${API_BASE_URL}/api/completion`, {
@@ -614,14 +651,12 @@ const ContestPage = () => {
               }
               
               const result = await completionResponse.json();
-              console.log("Completion recorded successfully:", result);
               // Assign the result to the higher-scoped variable
               updatedProgress = result.updatedProgress || {}; 
               // Update local progress state immediately
               setCompletionStatus(updatedProgress);
 
               // --- Ask user to advance to next test case ---
-              console.log("Score is 100%. Asking user to advance...");
 
               // Find the next available test case *before* asking
               const currentMilestoneScores = updatedProgress[selectedMilestone] || {};
@@ -651,17 +686,14 @@ const ContestPage = () => {
               if (hasNextTestCase && nextTestCase) {
                   const proceed = window.confirm(`Score is 100! Proceed to Test Case ${nextTestCase}?`);
                   if (proceed) {
-                      console.log(`User confirmed. Advancing to M${selectedMilestone} T${nextTestCase}`);
                       setSelectedTestCase(nextTestCase); // Update state to trigger UI change
                       // Reset upload state for the new test case
                       setUploadedFile(null);
                       setScore(null); // Reset score *after* advancing
                   } else {
-                      console.log("User chose not to advance.");
                       // Stay on the current test case, keep score displayed
                   }
               } else {
-                   console.log(`Completed last available test case (T${selectedTestCase}) for M${selectedMilestone}.`);
                    // Stay on the current test case, keep score displayed
               }
               // --- End Ask user to advance ---
@@ -675,7 +707,6 @@ const ContestPage = () => {
 
             // --- Ask user to advance ONLY if Score is 100% and recording was successful ---
             if (calculatedScore === 100 && updatedProgress) { // Check if updatedProgress has a value
-                console.log("Score is 100%. Asking user to advance...");
                 // Find the next available test case *using the updatedProgress*
                 const currentMilestoneScores = updatedProgress[selectedMilestone] || {};
                 const discoveredTestCases = new Set();
@@ -704,17 +735,14 @@ const ContestPage = () => {
                 if (hasNextTestCase && nextTestCase) {
                     const proceed = window.confirm(`Score is 100! Proceed to Test Case ${nextTestCase}?`);
                     if (proceed) {
-                        console.log(`User confirmed. Advancing to M${selectedMilestone} T${nextTestCase}`);
                         setSelectedTestCase(nextTestCase); // Update state to trigger UI change
                         // Reset upload state for the new test case
                         setUploadedFile(null);
                         setScore(null); // Reset score *after* advancing
                     } else {
-                        console.log("User chose not to advance.");
                         // Stay on the current test case, keep score displayed
                     }
                 } else {
-                    console.log(`Completed last available test case (T${selectedTestCase}) for M${selectedMilestone}.`);
                     // Stay on the current test case, keep score displayed
                 }
             } // End of if (calculatedScore === 100) for advancing logic
