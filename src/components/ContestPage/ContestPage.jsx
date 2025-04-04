@@ -5,17 +5,20 @@ import Papa from 'papaparse';
 import './ContestPage.css';
 
 // --- Google API Configuration ---
-const CLIENT_ID = '858518359438-du502hhi85fsdmnmfobv1hlpchilmaq8.apps.googleusercontent.com';
-const API_KEY = 'AIzaSyB3OYI6x559zdcm1ur8mB92lCU4ZpuKJu4';
+const CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID;
+const API_KEY = process.env.REACT_APP_GOOGLE_API_KEY;
 const DISCOVERY_DOCS = ["https://www.googleapis.com/discovery/v1/apis/drive/v3/rest"];
 const SCOPES = "https://www.googleapis.com/auth/drive.readonly";
 // --- ---
 
 // --- Contest Configuration ---
-const CONTEST_FOLDER_ID = '1XIczCfBsCFcuJ-4zgE85UNrUcN_DqsM_';
-const EXPECTED_OUTPUT_COLUMN = 'outout'; // Column name in Drive CSV
-const USER_ANSWER_COLUMN = 'output'; // Column name in User's CSV
-// --- --
+const CONTEST_FOLDER_ID = process.env.REACT_APP_CONTEST_FOLDER_ID;
+const EXPECTED_OUTPUT_COLUMN = process.env.REACT_APP_EXPECTED_OUTPUT_COLUMN; // Column name in Drive CSV
+const USER_ANSWER_COLUMN = process.env.REACT_APP_USER_ANSWER_COLUMN; // Column name in User's CSV
+// --- ---
+
+// Backend API URL
+const API_BASE_URL = process.env.REACT_APP_API_BASE_URL;
 
 // Filename parsing regex (adjust if convention differs)
 const PROBLEM_REGEX = /Problem_M(\d+)\.pdf$/i;
@@ -49,6 +52,7 @@ const ContestPage = () => {
   const [isAuthLoading, setIsAuthLoading] = useState(true); // Tracks initial auth check
   const [authError, setAuthError] = useState(null);
   const [userName, setUserName] = useState('');
+  const [completionStatus, setCompletionStatus] = useState({}); // Stores { milestoneId: [completedTestCaseId, ...], ... }
   // --- ---
   
   // Remove hardcoded lists
@@ -113,6 +117,8 @@ const ContestPage = () => {
         setUploadedFile(null);
         setScore(null);
         setDriveError(null);
+        // Fetch progress when user signs in
+        fetchProgress(id); 
       } else {
         console.log("User is signed out.");
         setUserName('');
@@ -123,6 +129,7 @@ const ContestPage = () => {
         setScore(null);
         setDriveError(null);
         setIsLoadingFiles(false); // Stop file loading if user signs out
+        setCompletionStatus({}); // Clear progress on sign out
       }
     };
 
@@ -238,10 +245,42 @@ const ContestPage = () => {
 
     fetchAndParseFiles();
     // Depend on sign-in status and GAPI load status
-  }, [isGapiLoaded, isSignedIn]);
+  }, [isGapiLoaded, isSignedIn]); // Dependency: only run when auth state changes
 
 
-  // --- Effect to Update Test Cases when Milestone Changes ---
+  // --- Fetch User Progress ---
+  const fetchProgress = async (contestId) => {
+    if (!isSignedIn || !isGapiLoaded) return; // Need to be signed in
+
+    console.log(`Fetching progress for contest ${contestId}`);
+    try {
+      const token = gapi.auth2.getAuthInstance().currentUser.get().getAuthResponse().id_token;
+      const response = await fetch(`${API_BASE_URL}/api/progress/${contestId}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+      }
+      const progressData = await response.json();
+      console.log("Received progress data:", progressData);
+      setCompletionStatus(progressData || {}); // Ensure it's an object
+    } catch (error) {
+      console.error("Error fetching progress:", error);
+      setDriveError(`Failed to fetch progress: ${error.message}`); // Use driveError state for simplicity
+      setCompletionStatus({}); // Reset progress on error
+    }
+  };
+
+  // Fetch progress initially when signed in, or if contest ID changes (though it doesn't here)
+  useEffect(() => {
+     fetchProgress(id);
+  }, [isSignedIn, isGapiLoaded, id]);
+
+
+  // --- Effect to Update Test Cases when Milestone Changes (incorporates progress) ---
   useEffect(() => {
     if (!selectedMilestone || allFiles.length === 0) {
       setAvailableTestCases([]);
@@ -249,32 +288,56 @@ const ContestPage = () => {
       return;
     }
 
-    console.log(`Updating test cases for Milestone ${selectedMilestone}`);
-    const testCasesSet = new Set();
+    console.log(`Updating test cases for Milestone ${selectedMilestone} with progress:`, completionStatus);
+    // Get the scores for the current milestone, default to empty object
+    const milestoneScores = completionStatus[selectedMilestone] || {}; 
+    const discoveredTestCases = new Set();
     allFiles.forEach(file => {
       const match = file.name?.match(TESTCASE_REGEX);
-      // Check if the milestone number in the filename matches the selected milestone
       if (match && match[1] === selectedMilestone) {
-        testCasesSet.add(match[2]); // Add the test case number
+        discoveredTestCases.add(match[2]); // Add the test case number
       }
     });
 
-    const sortedTestCases = Array.from(testCasesSet).sort((a, b) => parseInt(a) - parseInt(b));
-    setAvailableTestCases(sortedTestCases);
-    console.log(`Available Test Cases for M${selectedMilestone}:`, sortedTestCases);
+    const sortedDiscovered = Array.from(discoveredTestCases).sort((a, b) => parseInt(a) - parseInt(b));
+    
+    // Determine which test cases are actually available based on 100% score on previous
+    const unlockedTestCases = [];
+    for (const tc of sortedDiscovered) {
+        const tcNum = parseInt(tc);
+        // Test case 1 is always available if discovered
+        if (tcNum === 1) {
+            unlockedTestCases.push(tc);
+        } else {
+            // Check if the previous test case exists and has a score of 100
+            const prevTc = String(tcNum - 1);
+            if (milestoneScores[prevTc] === 100) {
+                unlockedTestCases.push(tc);
+            } else {
+                // If previous test case wasn't passed with 100%, stop unlocking further test cases
+                break; 
+            }
+        }
+    }
 
-    // Set the first test case as selected by default for the new milestone
-    if (sortedTestCases.length > 0) {
-      setSelectedTestCase(sortedTestCases[0]);
+    setAvailableTestCases(unlockedTestCases);
+    console.log(`Available Test Cases for M${selectedMilestone} (considering 100% score):`, unlockedTestCases);
+
+    // Select the first *unlocked* test case, or clear selection if none are available/unlocked
+    if (unlockedTestCases.length > 0) {
+        // If the previously selected test case is still unlocked, keep it. Otherwise, select the first unlocked.
+        if (!unlockedTestCases.includes(selectedTestCase)) {
+             setSelectedTestCase(unlockedTestCases[0]);
+        }
     } else {
       setSelectedTestCase('');
-      console.warn(`No test cases found for Milestone ${selectedMilestone}`);
+      console.warn(`No available/unlocked test cases found for Milestone ${selectedMilestone}`);
     }
-    // Reset upload/score state when milestone changes
+    // Reset upload state when milestone changes
     setUploadedFile(null);
-    setScore(null);
+    // setScore(null); // Remove score reset here
 
-  }, [selectedMilestone, allFiles]); // Re-run when milestone or the list of all files changes
+  }, [selectedMilestone, allFiles, completionStatus]); // Re-run when milestone, files, or progress changes
 
 
   // --- Effect to Update Selected Files based on M/T selection ---
@@ -302,9 +365,9 @@ const ContestPage = () => {
     setTestCaseInputFile(csv || null);
      if (!csv) console.warn(`Test Case CSV for M${selectedMilestone} T${selectedTestCase} not found.`);
 
-     // Reset upload/score state when test case changes
+     // Reset upload state when test case changes
      setUploadedFile(null);
-     setScore(null);
+     // setScore(null); // Remove score reset here
 
   }, [selectedMilestone, selectedTestCase, allFiles]); // Re-run when selection or files change
 
@@ -439,7 +502,7 @@ const ContestPage = () => {
   };
 
 
-  // Function to calculate score (Using GAPI for expected output)
+  // Function to calculate score (Using GAPI for expected output) & Record Completion
   const calculateScore = async (userFile) => {
       if (!userFile || !testCaseInputFile || !isSignedIn) {
           setDriveError("Missing user file, test case file information, or not signed in.");
@@ -524,7 +587,140 @@ const ContestPage = () => {
           console.log(`Score calculated: ${correctMatches} / ${expectedData.length} = ${calculatedScore}`);
           setScore(calculatedScore);
 
-      } catch (error) {
+          // Declare updatedProgress here to make it accessible later
+          let updatedProgress = null; 
+
+          // --- Record Score (Always) ---
+          console.log(`Recording score (${calculatedScore}) for M${selectedMilestone} T${selectedTestCase}`);
+          try {
+            const token = gapi.auth2.getAuthInstance().currentUser.get().getAuthResponse().id_token;
+            const completionResponse = await fetch(`${API_BASE_URL}/api/completion`, {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${token}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  contestId: id,
+                  milestoneId: selectedMilestone,
+                  testcaseId: selectedTestCase,
+                  score: calculatedScore // Add the score here
+                }),
+              });
+
+              if (!completionResponse.ok) {
+                const errorData = await completionResponse.json();
+                throw new Error(errorData.error || `Failed to record completion (HTTP ${completionResponse.status})`);
+              }
+              
+              const result = await completionResponse.json();
+              console.log("Completion recorded successfully:", result);
+              // Assign the result to the higher-scoped variable
+              updatedProgress = result.updatedProgress || {}; 
+              // Update local progress state immediately
+              setCompletionStatus(updatedProgress);
+
+              // --- Ask user to advance to next test case ---
+              console.log("Score is 100%. Asking user to advance...");
+
+              // Find the next available test case *before* asking
+              const currentMilestoneScores = updatedProgress[selectedMilestone] || {};
+                const discoveredTestCases = new Set();
+                allFiles.forEach(file => {
+                  const match = file.name?.match(TESTCASE_REGEX);
+                  if (match && match[1] === selectedMilestone) {
+                      discoveredTestCases.add(match[2]);
+                  }
+              });
+              const sortedDiscovered = Array.from(discoveredTestCases).sort((a, b) => parseInt(a) - parseInt(b));
+              const newlyAvailableTestCases = [];
+              for (const tc of sortedDiscovered) {
+                  const tcNum = parseInt(tc);
+                  if (tcNum === 1 || (currentMilestoneScores[String(tcNum - 1)] === 100)) {
+                      newlyAvailableTestCases.push(tc);
+                  } else {
+                      break;
+                  }
+              }
+
+              const currentTestCaseIndex = newlyAvailableTestCases.indexOf(selectedTestCase);
+              const hasNextTestCase = currentTestCaseIndex !== -1 && currentTestCaseIndex < newlyAvailableTestCases.length - 1;
+              const nextTestCase = hasNextTestCase ? newlyAvailableTestCases[currentTestCaseIndex + 1] : null;
+
+              // Ask for confirmation only if there is a next test case
+              if (hasNextTestCase && nextTestCase) {
+                  const proceed = window.confirm(`Score is 100! Proceed to Test Case ${nextTestCase}?`);
+                  if (proceed) {
+                      console.log(`User confirmed. Advancing to M${selectedMilestone} T${nextTestCase}`);
+                      setSelectedTestCase(nextTestCase); // Update state to trigger UI change
+                      // Reset upload state for the new test case
+                      setUploadedFile(null);
+                      setScore(null); // Reset score *after* advancing
+                  } else {
+                      console.log("User chose not to advance.");
+                      // Stay on the current test case, keep score displayed
+                  }
+              } else {
+                   console.log(`Completed last available test case (T${selectedTestCase}) for M${selectedMilestone}.`);
+                   // Stay on the current test case, keep score displayed
+              }
+              // --- End Ask user to advance ---
+
+            } catch (completionError) {
+              // This is the catch block for the fetch /api/completion call
+              console.error("Error recording completion:", completionError);
+              // Display error, but don't overwrite scoring error if one exists
+              setDriveError(prev => prev ? `${prev}\nFailed to record completion: ${completionError.message}` : `Failed to record completion: ${completionError.message}`);
+            } // End of try...catch for recording score
+
+            // --- Ask user to advance ONLY if Score is 100% and recording was successful ---
+            if (calculatedScore === 100 && updatedProgress) { // Check if updatedProgress has a value
+                console.log("Score is 100%. Asking user to advance...");
+                // Find the next available test case *using the updatedProgress*
+                const currentMilestoneScores = updatedProgress[selectedMilestone] || {};
+                const discoveredTestCases = new Set();
+                allFiles.forEach(file => {
+                    const match = file.name?.match(TESTCASE_REGEX);
+                    if (match && match[1] === selectedMilestone) {
+                        discoveredTestCases.add(match[2]);
+                    }
+                });
+                const sortedDiscovered = Array.from(discoveredTestCases).sort((a, b) => parseInt(a) - parseInt(b));
+                const newlyAvailableTestCases = [];
+                for (const tc of sortedDiscovered) {
+                    const tcNum = parseInt(tc);
+                    if (tcNum === 1 || (currentMilestoneScores[String(tcNum - 1)] === 100)) {
+                        newlyAvailableTestCases.push(tc);
+                    } else {
+                        break;
+                    }
+                }
+
+                const currentTestCaseIndex = newlyAvailableTestCases.indexOf(selectedTestCase);
+                const hasNextTestCase = currentTestCaseIndex !== -1 && currentTestCaseIndex < newlyAvailableTestCases.length - 1;
+                const nextTestCase = hasNextTestCase ? newlyAvailableTestCases[currentTestCaseIndex + 1] : null;
+
+                // Ask for confirmation only if there is a next test case
+                if (hasNextTestCase && nextTestCase) {
+                    const proceed = window.confirm(`Score is 100! Proceed to Test Case ${nextTestCase}?`);
+                    if (proceed) {
+                        console.log(`User confirmed. Advancing to M${selectedMilestone} T${nextTestCase}`);
+                        setSelectedTestCase(nextTestCase); // Update state to trigger UI change
+                        // Reset upload state for the new test case
+                        setUploadedFile(null);
+                        setScore(null); // Reset score *after* advancing
+                    } else {
+                        console.log("User chose not to advance.");
+                        // Stay on the current test case, keep score displayed
+                    }
+                } else {
+                    console.log(`Completed last available test case (T${selectedTestCase}) for M${selectedMilestone}.`);
+                    // Stay on the current test case, keep score displayed
+                }
+            } // End of if (calculatedScore === 100) for advancing logic
+            // --- End Ask user to advance ---
+
+          } catch (error) { // This catch is now for the outer try block (scoring calculation)
           console.error("Error during scoring:", error);
           // Use consistent error message extraction
           const errorDetails = error.result?.error?.message || error.message || 'An unknown error occurred.';
@@ -608,14 +804,23 @@ const ContestPage = () => {
               value={selectedTestCase}
               onChange={handleTestCaseChange}
               className="select-input"
-              disabled={availableTestCases.length === 0} // Disable if no test cases for selected milestone
+              disabled={availableTestCases.length === 0} // Disable if no test cases available/unlocked
             >
                <option value="" disabled>-- Select Test Case --</option>
-              {availableTestCases.map(t => (
-                <option key={t} value={t}>
-                  Test Case {t}
-                </option>
-              ))}
+              {/* Map over available (unlocked) test cases and add checkmark if solved */}
+              {availableTestCases.map(t => {
+                // Explicitly check if the score for this milestone/testcase is exactly 100
+                // If a checkmark appears unexpectedly, it means completionStatus contains this score
+                const milestoneProgress = completionStatus ? completionStatus[selectedMilestone] : undefined;
+                const testCaseScore = milestoneProgress ? milestoneProgress[t] : undefined;
+                const isSolved = testCaseScore === 100;
+                // console.log(`Checkmark debug: M=${selectedMilestone}, T=${t}, Score=${testCaseScore}, isSolved=${isSolved}`); // Keep for debugging if needed
+                return (
+                  <option key={t} value={t}>
+                    {isSolved ? '✓ ' : ''}Test Case {t}
+                  </option>
+                );
+              })}
             </select>
           </div>
         </div>
@@ -646,14 +851,14 @@ const ContestPage = () => {
                 {/* This selectors-container seems duplicated, removing the inner one */}
                 {/* <div className="selectors-container"> ... </div> */}
 
-            <div className="milestone-details"> {/* This seems like a duplicate details section, removing */}
-              {/* Content moved to the details section above */}
-              {/* Display file names if found */}
-              {problemStatementFile && <p>Problem Statement: <strong>{problemStatementFile.name}</strong></p>}
-              {testCaseInputFile && <p>Input/Output File: <strong>{testCaseInputFile.name}</strong></p>}
-              {/* Show warnings if specific files for selection are missing */}
-              {!problemStatementFile && selectedMilestone && <p className="warning-message">Problem statement PDF for Milestone {selectedMilestone} not found.</p>}
-              {!testCaseInputFile && selectedMilestone && selectedTestCase && <p className="warning-message">Test case CSV for M{selectedMilestone} T{selectedTestCase} not found.</p>}
+            {/* Removed duplicate milestone-details div */}
+            {/* Display file names if found */}
+            <div className="file-info-display"> {/* Optional: Wrap file info */}
+                {problemStatementFile && <p>Problem Statement: <strong>{problemStatementFile.name}</strong></p>}
+                {testCaseInputFile && <p>Input/Output File: <strong>{testCaseInputFile.name}</strong></p>}
+                {/* Show warnings if specific files for selection are missing */}
+                {!problemStatementFile && selectedMilestone && <p className="warning-message">Problem statement PDF for Milestone {selectedMilestone} not found.</p>}
+                {!testCaseInputFile && selectedMilestone && selectedTestCase && <p className="warning-message">Test case CSV for M{selectedMilestone} T{selectedTestCase} not found.</p>}
             </div>
 
             <div className="contest-actions">
