@@ -23,8 +23,8 @@ const API_BASE_URL = process.env.REACT_APP_API_BASE_URL;
 
 // Filename parsing regex (adjust if convention differs)
 const PROBLEM_REGEX = /Problem_M(\d+)\.pdf$/i;
-// Updated regex to capture input/output type and handle extensions
-const TESTCASE_REGEX = /TestCase_M(\d+)_T(\d+)_(input|output)\.(csv|json|txt)$/i;
+// Updated regex to capture ONLY input type and handle extensions
+const TESTCASE_INPUT_REGEX = /TestCase_M(\d+)_T(\d+)_input\.(csv|json|txt)$/i; // Renamed and simplified
 
 // Helper function to find the next available test case ID
 // Now uses testCaseFilesMap keys instead of allFiles
@@ -61,8 +61,8 @@ const ContestPage = () => {
   // State for available options, populated from Drive
   const [availableMilestones, setAvailableMilestones] = useState([]); // e.g., ['1', '2']
   const [availableTestCases, setAvailableTestCases] = useState([]); // Test cases for the selected milestone e.g., [{id: '1', locked: false}, ...]
-  // State to hold the structured map of test case files
-  const [testCaseFilesMap, setTestCaseFilesMap] = useState({}); // e.g., { '1': { '1': { input: file, output: file }, ... }, ... }
+  // State to hold the structured map of ONLY input test case files
+  const [testCaseInputFilesMap, setTestCaseInputFilesMap] = useState({}); // Renamed state variable
 
   const [uploadedFile, setUploadedFile] = useState(null);
   const [isDownloadingInput, setIsDownloadingInput] = useState(false);
@@ -96,6 +96,10 @@ const ContestPage = () => {
   const handleTestCaseChange = (e) => {
     const newTestCase = e.target.value;
     setSelectedTestCase(newTestCase);
+    // Explicitly clear score and uploaded file when test case changes
+    setScore(null);
+    setUploadedFile(null);
+    setDriveError(null); // Also clear any previous errors
   };
 
   // --- Google API Initialization and Auth Handling ---
@@ -130,7 +134,7 @@ const ContestPage = () => {
         setUploadedFile(null);
         setScore(null);
         setDriveError(null);
-        setTestCaseFilesMap({}); // Clear the map on sign in before fetch
+        setTestCaseInputFilesMap({}); // Use renamed state variable
         fetchProgress(id);
       } else {
         setUserName('');
@@ -141,7 +145,7 @@ const ContestPage = () => {
         setDriveError(null);
         setIsLoadingFiles(false);
         setCompletionStatus({});
-        setTestCaseFilesMap({}); // Clear the map on sign out
+        setTestCaseInputFilesMap({}); // Use renamed state variable
       }
     };
 
@@ -171,7 +175,7 @@ const ContestPage = () => {
   useEffect(() => {
     const fetchAndParseFiles = async () => {
       if (!isGapiLoaded || !isSignedIn || !CONTEST_FOLDER_ID) {
-        setTestCaseFilesMap({}); // Clear map
+        setTestCaseInputFilesMap({}); // Use renamed state variable
         setAvailableMilestones([]);
         setAvailableTestCases([]);
         setSelectedMilestone('');
@@ -184,7 +188,7 @@ const ContestPage = () => {
 
       setIsLoadingFiles(true);
       setDriveError(null);
-      setTestCaseFilesMap({}); // Clear previous map
+      setTestCaseInputFilesMap({}); // Use renamed state variable
 
       try {
         let allFetchedFiles = []; // Still fetch all files initially
@@ -205,7 +209,7 @@ const ContestPage = () => {
         } while (pageToken);
 
         // --- Process fetched files into the structured map AND find PDFs ---
-        const newTestCaseFilesMap = {};
+        const newTestCaseInputFilesMap = {}; // Renamed map variable
         const newProblemStatementFilesMap = {}; // Temporary map for PDFs
         const milestonesSet = new Set();
 
@@ -221,53 +225,30 @@ const ContestPage = () => {
             }
           }
 
-          const testcaseMatch = file.name?.match(TESTCASE_REGEX);
-          if (testcaseMatch) {
-            const [, milestoneId, testCaseId, type] = testcaseMatch; // type is 'input' or 'output'
+          // Match only input files now
+          const testcaseInputMatch = file.name?.match(TESTCASE_INPUT_REGEX);
+          if (testcaseInputMatch) {
+            const [, milestoneId, testCaseId] = testcaseInputMatch;
             milestonesSet.add(milestoneId);
 
-            // Ensure milestone and test case entries exist
-            if (!newTestCaseFilesMap[milestoneId]) {
-              newTestCaseFilesMap[milestoneId] = {};
-            }
-            if (!newTestCaseFilesMap[milestoneId][testCaseId]) {
-              newTestCaseFilesMap[milestoneId][testCaseId] = { input: null, output: null };
+            // Ensure milestone entry exists
+            if (!newTestCaseInputFilesMap[milestoneId]) {
+              newTestCaseInputFilesMap[milestoneId] = {};
             }
 
-            // Add the file to the correct slot (input/output)
-            if (type === 'input') {
-              if (newTestCaseFilesMap[milestoneId][testCaseId].input) {
-                 console.warn(`Duplicate input file found for M${milestoneId} T${testCaseId}: ${file.name}. Using the first one found.`);
-              } else {
-                 newTestCaseFilesMap[milestoneId][testCaseId].input = file;
-              }
-            } else if (type === 'output') {
-               if (newTestCaseFilesMap[milestoneId][testCaseId].output) {
-                 console.warn(`Duplicate output file found for M${milestoneId} T${testCaseId}: ${file.name}. Using the first one found.`);
-               } else {
-                 newTestCaseFilesMap[milestoneId][testCaseId].output = file;
-               }
+            // Store the input file directly under the test case ID
+            if (newTestCaseInputFilesMap[milestoneId][testCaseId]) {
+               console.warn(`Duplicate input file found for M${milestoneId} T${testCaseId}: ${file.name}. Using the first one found.`);
+            } else {
+               newTestCaseInputFilesMap[milestoneId][testCaseId] = file; // Store only the input file object
             }
           }
         });
 
-        // --- Validate the map: Ensure each test case has both input and output ---
-        Object.keys(newTestCaseFilesMap).forEach(mId => {
-            Object.keys(newTestCaseFilesMap[mId]).forEach(tId => {
-                const pair = newTestCaseFilesMap[mId][tId];
-                if (!pair.input || !pair.output) {
-                    console.warn(`Incomplete file pair for M${mId} T${tId}. Input: ${pair.input?.name}, Output: ${pair.output?.name}. This test case might not work correctly.`);
-                    // Optionally remove incomplete pairs: delete newTestCaseFilesMap[mId][tId];
-                }
-            });
-             // Optionally remove milestones with no complete pairs
-            // if (Object.keys(newTestCaseFilesMap[mId]).length === 0) {
-            //     delete newTestCaseFilesMap[mId];
-            //     milestonesSet.delete(mId);
-            // }
-        });
+        // --- Remove validation for output files ---
+        // No need to check for pairs anymore
 
-        setTestCaseFilesMap(newTestCaseFilesMap); // Store the structured map
+        setTestCaseInputFilesMap(newTestCaseInputFilesMap); // Store the structured map of input files
         setProblemStatementFilesMap(newProblemStatementFilesMap); // Store the found PDFs
 
         // --- Update available milestones ---
@@ -289,7 +270,7 @@ const ContestPage = () => {
         console.error("Error fetching/parsing Google Drive files:", error);
         const errorDetails = error.result?.error?.message || error.message || 'An unknown error occurred.';
         setDriveError(`Error fetching/parsing files: ${errorDetails}`);
-        setTestCaseFilesMap({}); // Clear map on error
+        setTestCaseInputFilesMap({}); // Use renamed state variable
         setAvailableMilestones([]);
         setAvailableTestCases([]);
         setSelectedMilestone('');
@@ -311,17 +292,38 @@ const ContestPage = () => {
 
     try {
       const token = gapi.auth2.getAuthInstance().currentUser.get().getAuthResponse().id_token;
-      const response = await fetch(`${API_BASE_URL}/api/progress/${contestId}`, {
+      // Add the missing '/contests/' segment to the URL path
+      const response = await fetch(`${API_BASE_URL}/api/contests/${contestId}/progress`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (!response.ok) {
         const errorData = await response.json();
-        throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+        // Try to parse error JSON, but fallback if it fails
+        const errorText = await response.text(); // Read error response as text first
+        let parsedErrorData = { error: `HTTP error! status: ${response.status}. Response: ${errorText}` }; // Renamed variable
+        try {
+            parsedErrorData = JSON.parse(errorText); // Try parsing if it might be JSON
+        } catch (parseError) {
+            console.warn("Could not parse error response as JSON:", errorText);
+        }
+        throw new Error(parsedErrorData.error || `HTTP error! status: ${response.status}`); // Use renamed variable
       }
-      const progressData = await response.json();
-      setCompletionStatus(progressData || {});
-    } catch (error) {
-      console.error("Error fetching progress:", error);
+
+      // Read response as text first for debugging
+      const responseText = await response.text();
+      console.log("Raw progress response:", responseText); // Log the raw text
+
+      try {
+        const progressData = JSON.parse(responseText); // Now attempt to parse
+        // Adjust to access the 'progress' property from the backend response { success: true, progress: {...} }
+        setCompletionStatus(progressData.progress || {});
+      } catch (parseError) {
+          console.error("Failed to parse progress response:", parseError, "Response text:", responseText);
+          throw new Error(`Failed to parse progress data received from server. Raw response: ${responseText}`);
+      }
+
+    } catch (error) { // Catch includes fetch errors and parse errors
+      console.error("Error fetching progress:", error); // Log the actual error
       setDriveError(`Failed to fetch progress: ${error.message}`);
       setCompletionStatus({});
     }
@@ -375,18 +377,18 @@ const ContestPage = () => {
   }, [updateSigninStatus]); 
 
 
-  // --- Effect to Update Test Cases when Milestone Changes (uses testCaseFilesMap) ---
+  // --- Effect to Update Test Cases when Milestone Changes (uses testCaseInputFilesMap) ---
   useEffect(() => {
-    // Check if the selected milestone exists in our map
-    if (!selectedMilestone || !testCaseFilesMap[selectedMilestone]) {
+    // Check if the selected milestone exists in our map of input files
+    if (!selectedMilestone || !testCaseInputFilesMap[selectedMilestone]) {
       setAvailableTestCases([]);
       setSelectedTestCase('');
       return;
     }
 
     const milestoneScores = completionStatus[selectedMilestone] || {};
-    // Get test case numbers available for this milestone from the map keys
-    const discoveredTestCases = Object.keys(testCaseFilesMap[selectedMilestone]);
+    // Get test case numbers available for this milestone from the input files map keys
+    const discoveredTestCases = Object.keys(testCaseInputFilesMap[selectedMilestone]);
 
     const sortedDiscovered = discoveredTestCases.sort((a, b) => parseInt(a) - parseInt(b));
 
@@ -413,8 +415,8 @@ const ContestPage = () => {
 
     setUploadedFile(null);
 
-  // Update dependency array: use testCaseFilesMap instead of allFiles
-  }, [selectedMilestone, testCaseFilesMap, completionStatus, selectedTestCase]);
+  // Update dependency array: use testCaseInputFilesMap
+  }, [selectedMilestone, testCaseInputFilesMap, completionStatus, selectedTestCase]);
 
 
   // --- Effect to Update Selected Problem Statement File (uses problemStatementFilesMap) ---
@@ -465,9 +467,8 @@ const ContestPage = () => {
 
   // --- Download Test Case Input File (Using GAPI and Map) ---
   const handleDownloadInputClick = async () => {
-    // Get the input file object from the map
-    const currentFiles = testCaseFilesMap[selectedMilestone]?.[selectedTestCase];
-    const inputFile = currentFiles?.input;
+    // Get the input file object from the input files map
+    const inputFile = testCaseInputFilesMap[selectedMilestone]?.[selectedTestCase]; // Directly access input file
 
     if (!inputFile || !isSignedIn) {
         setDriveError("Input file not found for this selection or not signed in.");
@@ -565,133 +566,73 @@ const ContestPage = () => {
     });
   };
 
-  // Helper function for deep equality check (for JSON comparison)
-  const deepEqual = (obj1, obj2) => {
-    if (obj1 === obj2) return true;
+  // Removed deepEqual helper function as comparison is now backend-driven
 
-    if (obj1 === null || typeof obj1 !== "object" || obj2 === null || typeof obj2 !== "object") {
-      return false;
-    }
-
-    const keys1 = Object.keys(obj1);
-    const keys2 = Object.keys(obj2);
-
-    if (keys1.length !== keys2.length) return false;
-
-    for (const key of keys1) {
-      if (!keys2.includes(key) || !deepEqual(obj1[key], obj2[key])) {
-        return false;
-      }
-    }
-    return true;
-  };
-
-
-  // Function to calculate score (Handles CSV, JSON, TXT using Map) & Record Completion
+  // Function to submit user output to backend for scoring
   const calculateScore = async (userFile) => {
-      // Get the OUTPUT file object from the map
-      const currentFiles = testCaseFilesMap[selectedMilestone]?.[selectedTestCase];
-      const expectedOutputFile = currentFiles?.output;
+      // Check if user file and selection are valid
+      if (!userFile || !selectedMilestone || !selectedTestCase || !isSignedIn || !API_BASE_URL || !id) {
+          setDriveError("Cannot submit: Missing user file, milestone/testcase selection, API URL, contest ID, or not signed in.");
+          return;
+      }
 
-      if (!userFile || !expectedOutputFile || !isSignedIn) {
-          setDriveError("User file, expected output file not found for this selection, or not signed in.");
+      // Check if the INPUT file exists in the map (as a proxy for valid test case selection)
+      const inputFile = testCaseInputFilesMap[selectedMilestone]?.[selectedTestCase];
+      if (!inputFile) {
+          setDriveError(`Cannot submit: Input file details not found for M${selectedMilestone} T${selectedTestCase}.`);
           return;
       }
 
       setIsUploading(true);
       setScore(null);
       setDriveError(null);
-      try {
-          // Fetch expected OUTPUT data from Google Drive
-          const driveResponse = await gapi.client.drive.files.get({ fileId: expectedOutputFile.id, alt: 'media' });
-          const expectedFileContent = driveResponse.body;
-          if (typeof expectedFileContent !== 'string') throw new Error('Invalid expected output content received.');
 
-          // Read user's uploaded file
+      try {
+          // Read user's uploaded file content
           const userFileContent = await userFile.text();
 
-          // Determine file type from the expected OUTPUT file's name
-          const fileName = expectedOutputFile.name || '';
-          const fileExtension = fileName.split('.').pop()?.toLowerCase();
+          // Get the Google ID token
+          const token = gapi.auth2.getAuthInstance().currentUser.get().getAuthResponse().id_token;
 
-          let calculatedScore = 0; // Default score
+          // Call the backend /api/submit endpoint
+          const response = await fetch(`${API_BASE_URL}/api/submit`, {
+              method: 'POST',
+              headers: {
+                  'Authorization': `Bearer ${token}`,
+                  'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                  contestId: id,
+                  milestoneId: selectedMilestone,
+                  testcaseId: selectedTestCase,
+                  userOutputContent: userFileContent
+                  // outputFormat is removed - backend determines this
+              }),
+          });
 
-          switch (fileExtension) {
-              case 'csv':
-                  // --- CSV Comparison (Raw Text) ---
-                  // Trim whitespace from both ends of the entire content for comparison
-                  if (userFileContent.trim() === expectedFileContent.trim()) {
-                      calculatedScore = 100;
-                  } else {
-                      calculatedScore = 0;
-                      console.log("CSV Comparison Failed (Raw Text): Content does not match.");
-                      // Optional: Log differences if needed for debugging large files
-                      // console.log("Expected:\n", expectedFileContent.trim());
-                      // console.log("Actual:\n", userFileContent.trim());
-                  }
-                  break;
+          const result = await response.json();
 
-              case 'json':
-                  // --- JSON Comparison ---
-                  try {
-                      const expectedJson = JSON.parse(expectedFileContent);
-                      const userJson = JSON.parse(userFileContent);
-                      if (deepEqual(expectedJson, userJson)) {
-                          calculatedScore = 100;
-                      } else {
-                          calculatedScore = 0;
-                          console.log("JSON Comparison Failed: Objects are not deeply equal.");
-                          // Optional: Log differences for debugging (can be complex)
-                      }
-                  } catch (jsonError) {
-                      throw new Error(`Failed to parse JSON: ${jsonError.message}`);
-                  }
-                  break;
-
-              case 'txt':
-                  // --- TXT Comparison ---
-                  // Trim whitespace from both ends of the entire content for comparison
-                  if (userFileContent.trim() === expectedFileContent.trim()) {
-                      calculatedScore = 100;
-                  } else {
-                      calculatedScore = 0;
-                      console.log("TXT Comparison Failed: Content does not match.");
-                  }
-                  break;
-
-              default:
-                  throw new Error(`Unsupported file type for scoring: .${fileExtension}`);
+          if (!response.ok) {
+              // Handle API errors (e.g., 400, 401, 500)
+              throw new Error(result.error || `API Error: ${response.status}`);
           }
 
-          setScore(calculatedScore);
+          if (result.success) {
+              // Update score and progress state from the backend response
+              setScore(result.score);
+              setCompletionStatus(result.updatedProgress || {}); // Update progress from backend
+              console.log(`Backend scoring successful for M${selectedMilestone} T${selectedTestCase}. Score: ${result.score}`);
+          } else {
+              // Handle cases where the API call succeeded but scoring failed logically
+              throw new Error(result.error || 'Backend reported scoring failure.');
+          }
 
-          // --- Record Score (Always) ---
-          let updatedProgress = null;
-          try {
-            const token = gapi.auth2.getAuthInstance().currentUser.get().getAuthResponse().id_token;
-            const completionResponse = await fetch(`${API_BASE_URL}/api/completion`, {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ contestId: id, milestoneId: selectedMilestone, testcaseId: selectedTestCase, score: calculatedScore }),
-              });
-              if (!completionResponse.ok) {
-                const errorData = await completionResponse.json();
-                throw new Error(errorData.error || `Failed to record completion (HTTP ${completionResponse.status})`);
-              }
-              const result = await completionResponse.json();
-              updatedProgress = result.updatedProgress || {}; 
-              setCompletionStatus(updatedProgress);
-            } catch (completionError) {
-              console.error("Error recording completion:", completionError);
-              setDriveError(prev => prev ? `${prev}\nFailed to record completion: ${completionError.message}` : `Failed to record completion: ${completionError.message}`);
-            } 
-      } catch (error) { 
-          console.error("Error during scoring:", error);
-          const errorDetails = error.result?.error?.message || error.message || 'An unknown error occurred.';
-          setDriveError(`Scoring Error: ${errorDetails}`);
-          setScore(null); 
+      } catch (error) {
+          console.error("Error submitting/scoring:", error);
+          setDriveError(`Submission/Scoring Error: ${error.message}`);
+          setScore(null); // Reset score on error
       } finally {
-          setIsUploading(false); 
+          setIsUploading(false);
       }
   };
 
@@ -722,21 +663,28 @@ const ContestPage = () => {
       setSelectedTestCase(nextId);
       // Reset states for the new test case
       setUploadedFile(null);
-      // setScore(null); // Let score naturally update/clear based on new context
+      setScore(null); // Uncommented to explicitly clear score when proceeding
       setDriveError(null); // Clear previous errors
     }
   };
 
-  // --- Calculate next test case ID for rendering using useMemo (using map keys) ---
+  // --- Calculate next test case ID for rendering using useMemo (using input map keys) ---
   const nextIdToProceed = useMemo(() => {
       if (score !== 100) return null;
-      const currentMilestoneTestCases = testCaseFilesMap[selectedMilestone] ? Object.keys(testCaseFilesMap[selectedMilestone]) : [];
+      // Use keys from the input files map
+      const currentMilestoneTestCases = testCaseInputFilesMap[selectedMilestone] ? Object.keys(testCaseInputFilesMap[selectedMilestone]) : [];
       if (!selectedMilestone || !selectedTestCase || currentMilestoneTestCases.length === 0 || !completionStatus[selectedMilestone]) {
           return null;
       }
       // Pass the array of test case IDs for the current milestone
       return findNextTestCaseId(completionStatus[selectedMilestone], currentMilestoneTestCases, selectedTestCase);
-  }, [score, completionStatus, selectedMilestone, selectedTestCase, testCaseFilesMap]); // Dependencies for the calculation
+  }, [score, completionStatus, selectedMilestone, selectedTestCase, testCaseInputFilesMap]); // Use renamed state variable
+
+  // Determine if the currently selected test case is locked
+  const isCurrentTestCaseLocked = useMemo(() => {
+    const currentTestCaseData = availableTestCases.find(tc => tc.id === selectedTestCase);
+    return currentTestCaseData?.locked || false; // Default to false if not found (shouldn't happen in normal flow)
+  }, [selectedTestCase, availableTestCases]);
 
   return (
     <div className="contest-container">
@@ -844,23 +792,13 @@ const ContestPage = () => {
             {/* Display file names derived from map */}
             <div className="file-info-display">
                 {problemStatementFile && <p>Problem Statement: <strong>{problemStatementFile.name}</strong></p>}
-                {/* Derive input/output files from map for display */}
-                {selectedMilestone && selectedTestCase && testCaseFilesMap[selectedMilestone]?.[selectedTestCase] ? (
-                    <>
-                        {testCaseFilesMap[selectedMilestone][selectedTestCase].input ? (
-                             <p>Input File: <strong>{testCaseFilesMap[selectedMilestone][selectedTestCase].input.name}</strong></p>
-                        ) : (
-                             <p className="warning-message">Input file for M{selectedMilestone} T{selectedTestCase} not found.</p>
-                        )}
-                         {testCaseFilesMap[selectedMilestone][selectedTestCase].output ? (
-                             <p>Expected Output File: <strong>{testCaseFilesMap[selectedMilestone][selectedTestCase].output.name}</strong></p>
-                         ) : (
-                             <p className="warning-message">Output file for M{selectedMilestone} T{selectedTestCase} not found.</p>
-                         )}
-                    </>
-                ) : (
-                     selectedMilestone && selectedTestCase && <p className="warning-message">Test case files for M{selectedMilestone} T{selectedTestCase} not found in map.</p>
-                )}
+                {/* Derive input file from map for display */}
+                {selectedMilestone && selectedTestCase && testCaseInputFilesMap[selectedMilestone]?.[selectedTestCase] ? (
+                    <p>Input File: <strong>{testCaseInputFilesMap[selectedMilestone][selectedTestCase].name}</strong></p>
+                 ) : (
+                     selectedMilestone && selectedTestCase && <p className="warning-message">Input file for M{selectedMilestone} T{selectedTestCase} not found.</p>
+                 )}
+                 {/* Removed display for Expected Output File */}
                  {/* Show warning if problem statement PDF is missing */}
                  {!problemStatementFile && selectedMilestone && <p className="warning-message">Problem statement PDF for Milestone {selectedMilestone} not found.</p>}
             </div>
@@ -875,22 +813,22 @@ const ContestPage = () => {
                  {isDownloadingStatement ? 'Opening...' : 'Download Problem Statement'}
                </button>
 
-              {/* Download Input File Button (disables based on input file from map) */}
+              {/* Download Input File Button (disables based on input file from map AND lock status) */}
               <button
                 className="download-button"
                 onClick={handleDownloadInputClick}
-                disabled={isDownloadingInput || !testCaseFilesMap[selectedMilestone]?.[selectedTestCase]?.input?.id || !isSignedIn}
+                disabled={isCurrentTestCaseLocked || isDownloadingInput || !testCaseInputFilesMap[selectedMilestone]?.[selectedTestCase]?.id || !isSignedIn} // Added isCurrentTestCaseLocked
               >
-                {isDownloadingInput ? 'Downloading...' : 'Download Input File'}
+                {isDownloadingInput ? 'Downloading...' : (isCurrentTestCaseLocked ? 'Locked' : 'Download Input File')}
               </button>
 
-              {/* Upload Output File Button (disables based on output file from map, as scoring needs it) */}
+              {/* Upload Output File Button (disables based on INPUT file existence AND lock status) */}
               <button
                 className="upload-button"
                 onClick={handleUploadClick}
-                disabled={isUploading || !testCaseFilesMap[selectedMilestone]?.[selectedTestCase]?.output?.id || !isSignedIn}
+                disabled={isCurrentTestCaseLocked || isUploading || !testCaseInputFilesMap[selectedMilestone]?.[selectedTestCase]?.id || !isSignedIn} // Added isCurrentTestCaseLocked
               >
-                {isUploading ? 'Scoring...' : 'Upload Your Output'}
+                {isUploading ? 'Scoring...' : (isCurrentTestCaseLocked ? 'Locked' : 'Upload Your Output')}
               </button>
           
               <input
