@@ -16,8 +16,8 @@ const HomePage = () => {
     // Simulate API check with timeout
     await new Promise(resolve => setTimeout(resolve, 500));
     
-    console.log(process.env.CONTEST_ID)
-    if (contestId === process.env.CONTEST_ID) {
+    // Hardcoded ID check - for this example, we use "12345"
+    if (contestId === 'SS2023-28') {
       navigate(`/contest/${contestId}`);
     } else {
       setError('Invalid contest ID. Try "12345".');
