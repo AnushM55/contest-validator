@@ -368,3 +368,36 @@
   .proceed-button:hover {
     background-color: #389e0d; /* Darker green on hover */
   }
+
+/* --- Leaderboard Toggle Styles --- */
+.leaderboard-toggle-section {
+  margin-top: 30px;
+  padding-top: 20px;
+  border-top: 1px solid #eee;
+  display: flex;
+  flex-direction: column;
+  align-items: center; /* Center the button */
+  gap: 20px; /* Space between button and leaderboard */
+}
+
+.toggle-leaderboard-button {
+  padding: 12px 25px;
+  border-radius: 8px;
+  font-weight: 500;
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.3s;
+  border: 1px solid #6e8efb; /* Use primary color for border */
+  background-color: white; /* White background */
+  color: #6e8efb; /* Primary color text */
+}
+
+.toggle-leaderboard-button:hover {
+  background-color: #f0f2ff; /* Very light primary color background on hover */
+  border-color: #5d7cfa;
+}
+
+.leaderboard-section {
+  width: 100%; /* Ensure leaderboard takes full width within its container */
+  /* Existing styles for leaderboard content will apply here */
+}
