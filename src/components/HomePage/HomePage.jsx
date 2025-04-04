@@ -16,6 +16,7 @@ const HomePage = () => {
     // Simulate API check with timeout
     await new Promise(resolve => setTimeout(resolve, 500));
     
+    console.log(process.env.CONTEST_ID)
     if (contestId === process.env.CONTEST_ID) {
       navigate(`/contest/${contestId}`);
     } else {
