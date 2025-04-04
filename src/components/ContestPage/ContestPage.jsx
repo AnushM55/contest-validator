@@ -2,6 +2,7 @@ import { useParams, Link } from 'react-router-dom';
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'; // Import useMemo
 import { gapi } from 'gapi-script'; // Import gapi-script
 import Papa from 'papaparse';
+import Leaderboard from '../Leaderboard/Leaderboard'; // Import Leaderboard
 import './ContestPage.css';
 
 // --- Google API Configuration ---
@@ -82,6 +83,7 @@ const ContestPage = () => {
   const [authError, setAuthError] = useState(null);
   const [userName, setUserName] = useState('');
   const [completionStatus, setCompletionStatus] = useState({}); // Stores { milestoneId: { testCaseId: score, ... }, ... }
+  const [showLeaderboard, setShowLeaderboard] = useState(false); // State to toggle leaderboard visibility
   // --- ---
   
   // Handler for Milestone dropdown change
@@ -616,77 +618,17 @@ const ContestPage = () => {
 
           switch (fileExtension) {
               case 'csv':
-                  // --- CSV Comparison ---
-                  // Always parse with headers and compare based on headers
-
-                  const [expectedData, userData] = await Promise.all([
-                      parseCsv(expectedFileContent, true), // Always parse with header: true
-                      parseCsv(userFileContent, true)      // Always parse with header: true
-                  ]);
-
-                  // PapaParse with header:true returns an array of objects
-                  if (!Array.isArray(expectedData) || !Array.isArray(userData)) throw new Error("Parsed CSV data is not in array format.");
-                  if (expectedData.length === 0) throw new Error("Expected CSV output file is empty or could not be parsed.");
-                  if (userData.length === 0) throw new Error("Your uploaded CSV file is empty or could not be parsed.");
-
-                  // Warn about row mismatch but proceed
-                  if (userData.length !== expectedData.length) {
-                      console.warn(`CSV Row count mismatch: Expected ${expectedData.length}, User ${userData.length}. Scoring based on common rows.`);
+                  // --- CSV Comparison (Raw Text) ---
+                  // Trim whitespace from both ends of the entire content for comparison
+                  if (userFileContent.trim() === expectedFileContent.trim()) {
+                      calculatedScore = 100;
+                  } else {
+                      calculatedScore = 0;
+                      console.log("CSV Comparison Failed (Raw Text): Content does not match.");
+                      // Optional: Log differences if needed for debugging large files
+                      // console.log("Expected:\n", expectedFileContent.trim());
+                      // console.log("Actual:\n", userFileContent.trim());
                   }
-
-                  let correctMatches = 0;
-                  const comparisonLength = Math.min(userData.length, expectedData.length);
-
-                  for (let i = 0; i < comparisonLength; i++) {
-                      // Compare row objects based on expected headers (parsed with headers)
-                      const userRowObj = userData[i];
-                      const expectedRowObj = expectedData[i];
-
-                          // Ensure both are valid objects
-                          if (typeof userRowObj !== 'object' || userRowObj === null || typeof expectedRowObj !== 'object' || expectedRowObj === null) {
-                              console.warn(`Row ${i+1} skipped: Invalid row data structure.`);
-                              continue; // Skip this row
-                          }
-
-                          // Get headers from the first expected row (assume consistent headers)
-                          const expectedHeaders = expectedData.length > 0 ? Object.keys(expectedData[0]) : [];
-                          if (expectedHeaders.length === 0) {
-                               console.warn(`Row ${i+1} skipped: Cannot determine expected headers.`);
-                               continue; // Skip if no headers
-                          }
-
-                          let rowMatch = true;
-                          // Check if user row has the same headers and compare values
-                          if (Object.keys(userRowObj).length !== expectedHeaders.length) {
-                              rowMatch = false; // Different number of columns
-                          } else {
-                              for (const header of expectedHeaders) {
-                                  if (!userRowObj.hasOwnProperty(header)) {
-                                      rowMatch = false; // User row missing an expected header
-                                      break;
-                                  }
-                                  const userCell = String(userRowObj[header] ?? '').trim();
-                                  const expectedCell = String(expectedRowObj[header] ?? '').trim();
-                                  if (userCell !== expectedCell) {
-                                      rowMatch = false;
-                                      // Optional: Log specific cell mismatch
-                                      // console.log(`Row ${i+1}, Header '${header}': Expected '${expectedCell}', Got '${userCell}'`);
-                                      break; // No need to check further cells in this row
-                                  }
-                              }
-                          }
-
-                          if (rowMatch) {
-                              correctMatches++;
-                          } else {
-                               // Optional: Log row mismatch details
-                               // console.log(`Row ${i+1} mismatch: Expected ${JSON.stringify(expectedRowObj)}, Got ${JSON.stringify(userRowObj)}`);
-                          }
-                      // Removed the outer if/else based on compareSpecificColumns
-                      // Removed extra brace here
-                  }
-                  // Score based on expected length
-                  calculatedScore = expectedData.length > 0 ? (correctMatches / expectedData.length) * 100 : 0;
                   break;
 
               case 'json':
@@ -1014,7 +956,27 @@ const ContestPage = () => {
         {isAuthLoading && <p>Initializing Google Sign-In...</p>}
 
       </div>
-    </div>
+
+      {/* Leaderboard Section - Conditionally rendered */}
+      {isSignedIn && isGapiLoaded && id && (
+        <div className="leaderboard-toggle-section">
+           <button
+             onClick={() => setShowLeaderboard(!showLeaderboard)}
+             className="toggle-leaderboard-button"
+           >
+             {showLeaderboard ? 'Hide Leaderboard' : 'Show Leaderboard'}
+           </button>
+           {showLeaderboard && (
+             <div className="leaderboard-section">
+               <Leaderboard
+                 contestId={id}
+                 userToken={gapi.auth2.getAuthInstance().currentUser.get().getAuthResponse().id_token}
+               />
+             </div>
+           )}
+        </div>
+      )}
+    </div> // This is the correct closing tag for contest-container
   );
 };
 
